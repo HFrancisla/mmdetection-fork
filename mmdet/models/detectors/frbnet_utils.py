@@ -1,22 +1,124 @@
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
-import numpy as np
-import random
 
+
+class DWT_2D(nn.Module):
+    """Haar 2-D DWT via pixel_unshuffle. (B,C,H,W) -> (B,4C,H/2,W/2) [LL,LH,HL,HH]."""
+
+    def forward(self, x):
+        xu = F.pixel_unshuffle(x, 2)
+        b, c4, h2, w2 = xu.shape
+        c = c4 // 4
+        xu = xu.view(b, c, 4, h2, w2)
+        x_ee, x_eo, x_oe, x_oo = xu[:, :, 0], xu[:, :, 1], xu[:, :, 2], xu[:, :, 3]
+        ll = (x_ee + x_eo + x_oe + x_oo) * 0.5
+        lh = (x_ee - x_eo + x_oe - x_oo) * 0.5
+        hl = (x_ee + x_eo - x_oe - x_oo) * 0.5
+        hh = (x_ee - x_eo - x_oe + x_oo) * 0.5
+        return torch.cat([ll, lh, hl, hh], dim=1)
+
+
+class IDWT_2D(nn.Module):
+    """Haar 2-D IDWT via pixel_shuffle. (B,4C,H/2,W/2) [LL,LH,HL,HH] -> (B,C,H,W)."""
+
+    def forward(self, x):
+        b, c4, h2, w2 = x.shape
+        c = c4 // 4
+        x = x.view(b, 4, c, h2, w2)
+        ll, lh, hl, hh = x[:, 0], x[:, 1], x[:, 2], x[:, 3]
+        x_ee = (ll + lh + hl + hh) * 0.5
+        x_eo = (ll - lh + hl - hh) * 0.5
+        x_oe = (ll + lh - hl - hh) * 0.5
+        x_oo = (ll - lh - hl + hh) * 0.5
+        x = torch.stack([x_ee, x_eo, x_oe, x_oo], dim=2)
+        x = x.view(b, c * 4, h2, w2)
+        return F.pixel_shuffle(x, 2)
+
+
+class LearnableDWT3Filter(nn.Module):
+    """V9: 3-level DWT channel-difference filter with three explicit pathways.
+
+    Pathway mapping (10 subbands, disjoint):
+      低频通路  LL3                 -> 去均值(挖DC/色偏) + a_LL*d + b_LL   (Wg[0,0]=0 + 白平衡)
+      中频通路  LH3 HL3 HH3 LH2 HL2 -> gamma_mid * d                       (结构增强, ~Phi)
+      高频通路  HH2 LH1 HL1 HH1     -> gamma_hi * d                        (细节/噪声)
+      HH 收缩   HH3 HH2 HH1         -> 额外乘 eta(<1)                     (Wg 压高频噪声)
+
+    Contract: (B,3,H,W) -> (B,3,H,W). Total params = 36.
+    """
+
+    def __init__(self, wave="haar"):
+        super().__init__()
+        assert wave == "haar"
+        self.dwt = DWT_2D()
+        self.idwt = IDWT_2D()
+        # 低频通路
+        self.a_LL = nn.Parameter(torch.tensor([0.3, 0.3, 0.3]))     # (3,)
+        self.b_LL = nn.Parameter(torch.zeros(3))
+        # 中频通路: LH3,HL3,HH3,LH2,HL2
+        self.gamma_mid = nn.Parameter(torch.full((5, 3), 0.1))      # (5,3)
+        # 高频通路: HH2,LH1,HL1,HH1
+        self.gamma_hi = nn.Parameter(torch.full((4, 3), 1e-3))      # (4,3)
+        # HH 收缩: HH1,HH2,HH3
+        self.eta = nn.Parameter(torch.tensor([0.5, 0.5, 0.5]))      # (3,)
+
+    @staticmethod
+    def _diff(subband):
+        r, g, bl = subband[:, 0:1], subband[:, 1:2], subband[:, 2:3]
+        return torch.cat([r - g, g - bl, r - bl], dim=1)
+
+    def forward(self, img):
+        b, c, h, w = img.shape
+        assert c == 3
+        pad_h = (-h) % 8
+        pad_w = (-w) % 8
+        x = torch.log(img.clamp(min=1e-6))
+        if pad_h or pad_w:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+
+        d1 = self.dwt(x); ll1, lh1, hl1, hh1 = d1.chunk(4, dim=1)
+        d2 = self.dwt(ll1); ll2, lh2, hl2, hh2 = d2.chunk(4, dim=1)
+        d3 = self.dwt(ll2); ll3, lh3, hl3, hh3 = d3.chunk(4, dim=1)
+
+        # ---- 低频通路: LL3 ----
+        ll3_c = ll3 - ll3.mean(dim=(2, 3), keepdim=True)
+        d_ll = self._diff(ll3_c)
+        ll3_o = d_ll * self.a_LL.view(1, 3, 1, 1) + self.b_LL.view(1, 3, 1, 1)
+
+        # ---- 中频通路 ----
+        lh3_o = self._diff(lh3) * self.gamma_mid[0].view(1, 3, 1, 1)
+        hl3_o = self._diff(hl3) * self.gamma_mid[1].view(1, 3, 1, 1)
+        hh3_o = self._diff(hh3) * self.gamma_mid[2].view(1, 3, 1, 1) * self.eta[2].view(1, 1, 1, 1)
+        lh2_o = self._diff(lh2) * self.gamma_mid[3].view(1, 3, 1, 1)
+        hl2_o = self._diff(hl2) * self.gamma_mid[4].view(1, 3, 1, 1)
+
+        # ---- 高频通路 ----
+        hh2_o = self._diff(hh2) * self.gamma_hi[0].view(1, 3, 1, 1) * self.eta[1].view(1, 1, 1, 1)
+        lh1_o = self._diff(lh1) * self.gamma_hi[1].view(1, 3, 1, 1)
+        hl1_o = self._diff(hl1) * self.gamma_hi[2].view(1, 3, 1, 1)
+        hh1_o = self._diff(hh1) * self.gamma_hi[3].view(1, 3, 1, 1) * self.eta[0].view(1, 1, 1, 1)
+
+        # ---- 逆变换 ----
+        ll2_r = self.idwt(torch.cat([ll3_o, lh3_o, hl3_o, hh3_o], dim=1))
+        ll1_r = self.idwt(torch.cat([ll2_r, lh2_o, hl2_o, hh2_o], dim=1))
+        out = self.idwt(torch.cat([ll1_r, lh1_o, hl1_o, hh1_o], dim=1))
+
+        if pad_h or pad_w:
+            out = out[:, :, :h, :w]
+        return out
 class RadialBasisFilter(nn.Module):
+    """FFT radial-basis filter (kept for F0 reference)."""
+
     def __init__(self, n_coeff, lamda):
         super().__init__()
         self.n_coeff = n_coeff
         self.n_ang_freq = 1
-        # learnable coeffs (real-valued)
         self.coeff_mag   = nn.Parameter(torch.zeros(n_coeff))
         self.coeff_phase = nn.Parameter(torch.zeros(n_coeff))
         self.lamda = lamda
-
-        self.raw_gate_mag = nn.Parameter(torch.ones(n_coeff))    
-        self.raw_gate_phase = nn.Parameter(torch.ones(n_coeff))  
-
+        self.raw_gate_mag = nn.Parameter(torch.ones(n_coeff))
+        self.raw_gate_phase = nn.Parameter(torch.ones(n_coeff))
         mu = torch.linspace(0.0, 1.0, steps=n_coeff)
         self.register_buffer('mu', mu)
         self.log_bwh = nn.Parameter(torch.tensor(0.0))
@@ -25,72 +127,56 @@ class RadialBasisFilter(nn.Module):
         fy = torch.fft.fftfreq(H, dtype=dtype, device=device)[:, None]
         fx = torch.fft.rfftfreq(W, dtype=dtype, device=device)[None, :]
         r_hat = torch.sqrt(fx ** 2 + fy ** 2)
-        r_hat = r_hat / r_hat.max()  # normalize to 0..1
-
+        r_hat = r_hat / r_hat.max()
         bwh = torch.exp(self.log_bwh) + 1e-6
         basis = torch.exp(-((r_hat.unsqueeze(0) - self.mu[:, None, None]) ** 2) / (2 * bwh ** 2))
-
         gate_mag = torch.sigmoid(self.raw_gate_mag)[:, None, None]
         gate_phase = torch.sigmoid(self.raw_gate_phase)[:, None, None]
-
         angular_mod = 0
         theta = torch.atan2(fy, fx + 1e-8)
         for n in range(1, self.n_ang_freq + 1):
             angular_mod += torch.cos(n * theta) + torch.sin(n * theta)
         angular_mod = angular_mod / (2 * self.n_ang_freq)
         angular_mod = 1 + 0.1 * angular_mod
-
         basis = basis * angular_mod.unsqueeze(0)
-
         diff_mag = (gate_mag * self.coeff_mag[:, None, None] * basis).sum(0, keepdim=True)
         diff_phase = (gate_phase * self.coeff_phase[:, None, None] * basis).sum(0, keepdim=True)
         return diff_mag, diff_phase
 
+
 class LearnableFreFilter(nn.Module):
-    def __init__(self, number_K = 10, lamda = 0.1):
+    """Original FFT FIM (kept for F0 reference)."""
+
+    def __init__(self, number_K=10, lamda=0.1):
         super().__init__()
-        def generate_random_number():
-            number = round(random.uniform(0.95, 1.05), 2)
-            return number
-        
         self.init_sigma_ratio = 0.2
-        # self.alpha_rg  = nn.Parameter(torch.tensor(generate_random_number()))
-        # self.alpha_gb  = nn.Parameter(torch.tensor(generate_random_number()))
-        # self.alpha_rb  = nn.Parameter(torch.tensor(generate_random_number()))
         self.log_sigma = nn.Parameter(torch.tensor(0.0))
-
-        self.rad_filter  = RadialBasisFilter(number_K, lamda)
-
+        self.rad_filter = RadialBasisFilter(number_K, lamda)
         self._sigma_init = False
-    # ------------------------------------------------------------------
+
     def forward(self, img):
         B, C, H, W = img.shape
         dtype, device = img.dtype, img.device
         assert C == 3
-
         if not self._sigma_init:
             sigma_px = self.init_sigma_ratio * min(H, W)
             with torch.no_grad():
                 self.log_sigma.copy_(torch.tensor(np.log(sigma_px), dtype=dtype, device=device))
             self._sigma_init = True
-
-        diff_mag, diff_phase = self.rad_filter(H, W, device, dtype)  # (1,H,W/2+1)
+        diff_mag, diff_phase = self.rad_filter(H, W, device, dtype)
         D = diff_mag.to(dtype) * torch.exp(1j * diff_phase.to(dtype))
-
         x = torch.log(img.clamp(min=1e-6))
         r, g, b = x[:, 0:1], x[:, 1:2], x[:, 2:3]
         fft_r, fft_g, fft_b = (torch.fft.rfft2(ch, norm='ortho') for ch in (r, g, b))
         diff_rg = fft_r - fft_g
         diff_gb = fft_g - fft_b
         diff_rb = fft_r - fft_b
-
         fy = torch.fft.fftfreq(H, dtype=dtype, device=device)[:, None]
         fx = torch.fft.rfftfreq(W, dtype=dtype, device=device)[None, :]
         r_grid = torch.sqrt(fx ** 2 + fy ** 2)
         sigma = torch.exp(self.log_sigma)
-        Wg = torch.exp(- (r_grid / sigma) ** 2)  
-        Wg = Wg.clone(); Wg[0, 0] = 0.0          
-
+        Wg = torch.exp(-(r_grid / sigma) ** 2)
+        Wg = Wg.clone(); Wg[0, 0] = 0.0
 
         def _filt(diff_fft):
             diff_fft = diff_fft.squeeze(1)
@@ -100,28 +186,57 @@ class LearnableFreFilter(nn.Module):
         fccr_rg = _filt(diff_rg)
         fccr_gb = _filt(diff_gb)
         fccr_rb = _filt(diff_rb)
-        fccr_feat = torch.cat([fccr_rg, fccr_gb, fccr_rb], dim=1)  # (B,3,H,W)
+        return torch.cat([fccr_rg, fccr_gb, fccr_rb], dim=1)
 
-        return fccr_feat
+
+class LearnableDWTFilter(nn.Module):
+    """V1 light DWT filter (kept for reference)."""
+
+    def __init__(self, wave="haar"):
+        super().__init__()
+        self.dwt = DWT_2D()
+        self.idwt = IDWT_2D()
+        self.band_gains = nn.Parameter(torch.zeros(3, 4, 1, 1))
+        self.band_bias = nn.Parameter(torch.zeros(3, 4, 1, 1))
+
+    def forward(self, img):
+        b, c, h, w = img.shape
+        assert c == 3
+        pad_h = h % 2
+        pad_w = w % 2
+        x = torch.log(img.clamp(min=1e-6))
+        if pad_h or pad_w:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+        bands = self.dwt(x).chunk(4, dim=1)
+        diff_coeffs = []
+        for band_idx, band in enumerate(bands):
+            r, g, bl = band[:, 0:1], band[:, 1:2], band[:, 2:3]
+            band_diffs = torch.cat([r - g, g - bl, r - bl], dim=1)
+            gain = self.band_gains[:, band_idx].view(1, 3, 1, 1)
+            bias = self.band_bias[:, band_idx].view(1, 3, 1, 1)
+            diff_coeffs.append(band_diffs * gain + bias)
+        out = self.idwt(torch.cat(diff_coeffs, dim=1))
+        if pad_h or pad_w:
+            out = out[:, :, :h, :w]
+        return out
+
 
 class FIINet(nn.Module):
-    def __init__(self, number_K, lamda): 
-        super(FIINet, self).__init__()
+    """FIINet with V6 two-level DWT filter (FIM)."""
 
-        self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1), 
-                                        nn.BatchNorm2d(24),
-                                        nn.LeakyReLU(),
-                                        ])
-        self.spectral_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1), 
-                                        nn.BatchNorm2d(24),
-                                        nn.LeakyReLU(),
-                                        ])
+    def __init__(self, number_K, lamda):
+        super(FIINet, self).__init__()
+        self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
+                                           nn.BatchNorm2d(24),
+                                           nn.LeakyReLU()])
+        self.spectral_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
+                                            nn.BatchNorm2d(24),
+                                            nn.LeakyReLU()])
         self.fuse_net = nn.Sequential(*[nn.Conv2d(48, 32, 3, 1, 1, groups=2),
-                                    nn.BatchNorm2d(32),
-                                    nn.LeakyReLU(),
-                                    nn.Conv2d(32, 3, 3, 1, 1, groups=1)
-                                    ])
-        self.fim = LearnableFreFilter(number_K, lamda)
+                                        nn.BatchNorm2d(32),
+                                        nn.LeakyReLU(),
+                                        nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
+        self.fim = LearnableDWT3Filter()
 
     def forward(self, x):
         feat_f = self.fim(x)
@@ -130,4 +245,3 @@ class FIINet(nn.Module):
         feat_agg = torch.concat((feat_spatial, feat_spectral), dim=1)
         x_out = self.fuse_net(feat_agg)
         return x_out
-
