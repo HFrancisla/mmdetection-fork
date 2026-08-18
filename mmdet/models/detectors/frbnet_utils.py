@@ -1,236 +1,97 @@
-def dst2_fft(x):
-    """DST-II, 沿最后一维。x: (..., N) -> (..., N), 正交归一。
-
-    Y_k = c_k · Σ_n x_n sin(π(2n+1)(k+1)/(2N)),  k = 0..N-1
-    实现: W_m = e^{-iπm/(2N)} · FFT_{2N}([x, 0..0])[m],  Y_k = -Im(W_{k+1})
-    """
-    N = x.shape[-1]
-    xp = torch.cat([x, torch.zeros_like(x)], dim=-1)          # (..., 2N)
-    F = torch.fft.fft(xp)                                     # (..., 2N) complex
-    m = torch.arange(1, N + 1, device=x.device, dtype=x.dtype)
-    W = torch.exp(-1j * torch.pi * m / (2 * N)) * F[..., 1:N + 1]
-    S = -W.imag                                               # DST-II 未归一化
-    scale = torch.full((N,), math.sqrt(2.0 / N), dtype=x.dtype, device=x.device)
-    scale[-1] = math.sqrt(1.0 / N)                            # k=N-1 特殊缩放
-    return S * scale
-
-
-def dst2_2d(x):
-    """二维 DST-II (可分离): 先沿 W 再沿 H。x: (..., H, W) -> (..., H, W)"""
-    y = dst2_fft(x)                                           # 沿 W
-    y = dst2_fft(y.transpose(-1, -2))                         # 沿 H
-    return y.transpose(-1, -2)
-
-
-"""DCT 消融版 (D5/D6/D7): 基于 DCT v4 (fii-dct-v4-energy-focus) 的能量集中结构,
-用 env 开关拆解 v4 的两个机制并测试 v2×v4 相位组合:
-
-  - D5 (v4b, 只对数 μ):    FRBNET_DCT_NO_SEG_WG=1   -> SegmentWg 换回 v1 单高斯窗
-  - D6 (v4c, 只分段窗):     FRBNET_DCT_NO_LOG_MU=1   -> 径向基 μ 回均匀分布 (v1)
-  - D7 (v2+v4 组合):        FRBNET_DCT_DST_BRANCH=1  -> +DST 支 (相位类自由度, 初值 0)
-                           (DCT 支按 D5/D6 开关取 log μ + 窗; DST 支用均匀 μ + 同一窗)
-  - 默认 (全关) = D4 (v4a 完整版)
-config: D5/D6 用 yolov3_frbnet_exdark_dct_v4.py (K=20); D7 用 dct_v2 (K=10, 双支参数对等)
-
-参数: D4=44 / D5=42 / D6=43 / D7=45 (K=10 双支 21+21+3) | 初始化 coeff=0 (保守起步)
-"""
-import math
-import os
-
-import torch
-import torch.nn as nn
-import torch_dct as td
-
-
-def _dct_flag(name):
-    return os.environ.get(name, "0") == "1"
-
-"""DCT v4: 能量集中低频分带版 (fii-dct-v4-energy-focus)
+"""DCT v8: 极简骨架版 MIN-DCT (fii-dct-v8-min)
 
 完整 frbnet_utils.py 平替 —— 保持 FIINet(number_K, lamda) 接口契约:
   (B, 3, H, W) -> (B, 3, H, W)
 
-相对 v1 (LearnableDCTFilter) 的单变量修改:
-  1. 径向基 μ 对数分布 (alpha=2.5): 低频密集 (能量集中区), 高频稀疏
-  2. Wg 单高斯 -> SegmentWg 分段窗: DC 邻域 (r<=r_c) 精细高斯衰减 + 中高频平坦小量 γ_hi
-     (利用 DCT 频率分辨率 ×2 与无边界伪高频优势)
-  3. 其余同 v1 (通道差 DCT -> 实数掩膜 -> idct)
+设计: plans/DCT/20260816_FII_DCT_V7-V10_全新设计方案.md §2 (组件汤结论 + G1 骨架假设):
+  v5 消融 D9–D12 全部持平 (中性组件汤) -> 收益在"骨架组合"而非任何单组件;
+  D10 块≡全局 (0.7488) -> 分块结构不负载 -> v8 砍掉全部分块.
 
-参数: RadialBasisFilterReal(log-μ, K=20) 41 + SegmentWg 3 = 44
-初始化: coeff=0 -> 分支初始输出全 0 (保守起步)
+结构 (零分块, 41 参数):
+  1. log 域通道差 FCCR (M1): Δ_rg/Δ_gb/Δ_rb, 光照不变骨架
+  2. 整图 DCT (dct_2d, norm='ortho')
+  3. 全局挖 DC: D[0,0] = 0  ≡ 去全图均值 (M1 语义, v4 Wg[0,0]=0 同款)
+  4. 全图标量增益 γ_c(x) = σ(MLP([全图均值, 方差, 梯度范数])) (输入相关, 打破 L2)
+     MLP 三通道共享权重, 逐通道独立统计 -> (B,3) 标量, 无任何空间变化 (F7 红线)
+  5. IDCT -> 3 通道 -> spectral_net -> fuse_net(concat(spatial_net(x))) + x (M4 残差)
 
-已知边界: 同 v1 (D2 等变, 无相位自由度)
+参数: γ MLP (3->8->1) 41 (共享, 不含基础 net)
+初始化: γ 末层 bias=-3 (σ≈0.047, 白化缓慢介入, D15 口径)
+假设: H-M1 骨架本身承载 D14 增益 (v8 ≥ D14 − 2σ) / H-M2 v8 ≥ 2σ vs A5
+      / H-M3 全局 γ 输入相关必要 (开关: 固定标量)
 """
-import math
-
 import torch
 import torch.nn as nn
 import torch_dct as td
 
-
-def log_mu(n_coeff, alpha=2.5):
-    """对数频率分带的 μ: 低频密集, 高频稀疏, 映射到 [0,1]."""
-    t = torch.linspace(0.0, 1.0, steps=n_coeff)
-    return (torch.exp(alpha * t) - 1) / (math.exp(alpha) - 1)
+NO_RESIDUAL = __import__('os').environ.get('FRBNET_DCT_V8_NO_RESIDUAL', '0') == '1'
+FIXED_GAMMA = __import__('os').environ.get('FRBNET_DCT_V8_FIXED_GAMMA', '0') == '1'  # H-M3
 
 
-class RadialBasisFilterReal(nn.Module):
-    """K 个径向基的实数增益 (v4: μ 对数分布)."""
+class MinimalGlobalWhiten(nn.Module):
+    """v8: 整图 DCT + 全局 DC 挖除 + 全局统计 γ (零分块, 零空间变化)."""
 
-    def __init__(self, n_coeff, lamda, mu_mode='log'):
+    def __init__(self):
         super().__init__()
-        self.n_coeff = n_coeff
-        self.n_ang_freq = 1
-        self.coeff_mag = nn.Parameter(torch.zeros(n_coeff))   # 初值 0 -> 保守起步
-        self.raw_gate_mag = nn.Parameter(torch.ones(n_coeff))
-        self.lamda = lamda
+        # 输入相关全图标量增益 γ(x): MLP(均值/方差/梯度范数), 三通道共享权重
+        self.gamma_mlp = nn.Sequential(
+            nn.Linear(3, 8),
+            nn.LeakyReLU(0.1),
+            nn.Linear(8, 1),
+        )
+        with torch.no_grad():
+            for m in self.gamma_mlp:
+                if isinstance(m, nn.Linear):
+                    m.weight.normal_(0.0, 0.01)
+            self.gamma_mlp[2].bias.fill_(-3.0)  # σ≈0.047 白化缓慢介入 (D15 口径)
 
-        if mu_mode == 'log':
-            mu = log_mu(n_coeff)
+    @staticmethod
+    def _global_stats(x):
+        """x: (B,C,H,W) log 域 -> (B,C,3) [全图均值, 方差, 梯度范数]."""
+        bmean = x.mean(dim=(-1, -2))
+        bvar = x.var(dim=(-1, -2), unbiased=False)
+        grad = (x[..., 1:, :] - x[..., :-1, :]).abs().mean(dim=(-1, -2))
+        grad = grad + (x[..., :, 1:] - x[..., :, :-1]).abs().mean(dim=(-1, -2))
+        grad = grad / 2.0
+        return torch.stack([bmean, bvar, grad], dim=-1)  # (B,C,3)
+
+    def forward(self, x, diffs):
+        """x: (B,3,H,W) log 域原图 (统计来源); diffs: (B,3,H,W) log 域通道差."""
+        B, C, H, W = diffs.shape
+        D = td.dct_2d(diffs, norm='ortho')                    # 整图 DCT (B,3,H,W)
+        if FIXED_GAMMA:
+            gamma = torch.full((B, C, 1, 1), 0.5, device=D.device, dtype=D.dtype)
         else:
-            mu = torch.linspace(0.0, 1.0, steps=n_coeff)
-        self.register_buffer('mu', mu)
-        self.log_bwh = nn.Parameter(torch.tensor(0.0))
-
-    def forward(self, H: int, W: int, device, dtype):
-        fy = torch.arange(H, dtype=dtype, device=device) / (2 * H)
-        fx = torch.arange(W, dtype=dtype, device=device) / (2 * W)
-        r_hat = torch.sqrt(fx ** 2 + fy[:, None] ** 2)
-        r_hat = r_hat / r_hat.max()  # normalize to 0..1
-
-        bwh = torch.exp(self.log_bwh) + 1e-6
-        basis = torch.exp(-((r_hat.unsqueeze(0) - self.mu[:, None, None]) ** 2) / (2 * bwh ** 2))
-
-        gate_mag = torch.sigmoid(self.raw_gate_mag)[:, None, None]
-
-        angular_mod = 0
-        theta = torch.atan2(fy[:, None], fx[None, :] + 1e-8)
-        for n in range(1, self.n_ang_freq + 1):
-            angular_mod = angular_mod + torch.cos(n * theta) + torch.sin(n * theta)
-        angular_mod = angular_mod / (2 * self.n_ang_freq)
-        angular_mod = 1 + 0.1 * angular_mod
-
-        basis = basis * angular_mod.unsqueeze(0)
-
-        diff_mag = (gate_mag * self.coeff_mag[:, None, None] * basis).sum(0, keepdim=True)
-        return diff_mag  # (1,H,W) 实数
+            stats = self._global_stats(x)                     # (B,C,3)
+            gamma = torch.sigmoid(self.gamma_mlp(stats))      # (B,C,1) -> 全图标量
+            gamma = gamma[:, :, None, None]
+        D = D * gamma                                         # 输入相关全图重缩放
+        D[..., 0, 0] = 0.0                                    # 挖 DC ≡ 去全图均值
+        return td.idct_2d(D, norm='ortho')
 
 
-class SegmentWg(nn.Module):
-    """DC 邻域分段窗: 精细高斯 (r<=r_c) + 中高频平坦小量 (r>r_c), Wg[0,0]=0."""
+class LearnableMinimalGlobalFilter(nn.Module):
+    """v8: 极简骨架 (通道差 -> 整图 DCT -> 全局 DC 白化 -> IDCT).
 
-    def __init__(self, init_sigma_ratio=0.2):
-        super().__init__()
-        self.init_sigma_ratio = init_sigma_ratio
-        self.log_sigma1 = nn.Parameter(torch.tensor(0.0))          # DC 邻域带宽
-        self.log_rc = nn.Parameter(torch.tensor(math.log(0.07)))   # 分段点 r_c
-        self.log_gamma_hi = nn.Parameter(torch.tensor(math.log(1e-3)))  # 高频平坦量
-        self._init = False
-
-    def forward(self, H: int, W: int, device, dtype):
-        if not self._init:
-            sigma_px = self.init_sigma_ratio * min(H, W)
-            with torch.no_grad():
-                self.log_sigma1.copy_(torch.tensor(math.log(sigma_px), dtype=dtype, device=device))
-            self._init = True
-
-        fy = torch.arange(H, dtype=dtype, device=device) / (2 * H)
-        fx = torch.arange(W, dtype=dtype, device=device) / (2 * W)
-        r = torch.sqrt(fx ** 2 + fy[:, None] ** 2)
-        s1 = torch.exp(self.log_sigma1)
-        rc = torch.exp(self.log_rc)
-        ghi = torch.exp(self.log_gamma_hi)
-        w = torch.where(r <= rc,
-                        torch.exp(-(r / s1) ** 2),
-                        ghi * torch.exp(-(rc / s1) ** 2))
-        w = w.clone()
-        w[0, 0] = 0.0  # 挖 DC (去全局均值)
-        return w
-
-
-class GaussianWg(nn.Module):
-    """v1 风格单高斯窗: Wg = exp(-(r/sigma)^2), Wg[0,0]=0 (挖 DC)."""
-
-    def __init__(self, init_sigma_ratio=0.2):
-        super().__init__()
-        self.init_sigma_ratio = init_sigma_ratio
-        self.log_sigma = nn.Parameter(torch.tensor(0.0))
-        self._init = False
-
-    def forward(self, H: int, W: int, device, dtype):
-        if not self._init:
-            sigma_px = self.init_sigma_ratio * min(H, W)
-            with torch.no_grad():
-                self.log_sigma.copy_(torch.tensor(math.log(sigma_px), dtype=dtype, device=device))
-            self._init = True
-        fy = torch.arange(H, dtype=dtype, device=device) / (2 * H)
-        fx = torch.arange(W, dtype=dtype, device=device) / (2 * W)
-        r = torch.sqrt(fx ** 2 + fy[:, None] ** 2)
-        sigma = torch.exp(self.log_sigma)
-        w = torch.exp(-(r / sigma) ** 2)
-        w = w.clone()
-        w[0, 0] = 0.0
-        return w
-
-
-class LearnableDCTEnergyFilter(nn.Module):
-    """DCT 消融版 FIM: v4 能量集中 + (可选) DST 相位支.
-
-    forward: (B,3,H,W) -> (B,3,H,W)
-      out = idct(Mr·Wg ⊙ DCT(Δ)) [+ idct(Md·Wg ⊙ DST(Δ))],  Δ = log 域通道差
+    number_K 保留仅为接口兼容 (无全局径向基).
     """
 
     def __init__(self, number_K=20, lamda=0.1):
         super().__init__()
-        self._dst = _dct_flag("FRBNET_DCT_DST_BRANCH")
-        mu_mode = 'uniform' if _dct_flag("FRBNET_DCT_NO_LOG_MU") else 'log'
-        wg = GaussianWg() if _dct_flag("FRBNET_DCT_NO_SEG_WG") else SegmentWg()
-
-        self.rad_mr = RadialBasisFilterReal(number_K, lamda, mu_mode=mu_mode)  # DCT 支
-        self.wg = wg
-        if self._dst:
-            self.rad_md = RadialBasisFilterReal(number_K, lamda, mu_mode='uniform')  # DST 支 (v2 语义)
-            with torch.no_grad():
-                self.rad_md.coeff_mag.zero_()                  # Md 初值 0 -> 优雅降级为 DCT 单支
+        self.whiten = MinimalGlobalWhiten()
 
     def forward(self, img):
-        B, C, H, W = img.shape
-        dtype, device = img.dtype, img.device
-        assert C == 3
-
-        Mr = self.rad_mr(H, W, device, dtype)                  # (1,H,W)
-        Wg = self.wg(H, W, device, dtype)                      # (H,W)
-
         x = torch.log(img.clamp(min=1e-6))
         r, g, b = x[:, 0:1], x[:, 1:2], x[:, 2:3]
-        dct_r, dct_g, dct_b = (td.dct_2d(ch, norm='ortho') for ch in (r, g, b))
-        diff_dct_rg, diff_dct_gb, diff_dct_rb = dct_r - dct_g, dct_g - dct_b, dct_r - dct_b
-
-        if self._dst:
-            dst_r, dst_g, dst_b = dst2_2d(r), dst2_2d(g), dst2_2d(b)
-            diff_dst_rg, diff_dst_gb, diff_dst_rb = dst_r - dst_g, dst_g - dst_b, dst_r - dst_b
-            Md = self.rad_md(H, W, device, dtype)
-
-            def _filt(diff_dct, diff_dst):
-                out = (td.idct_2d((Mr * Wg) * diff_dct.squeeze(1), norm='ortho')
-                       + td.idct_2d((Md * Wg) * diff_dst.squeeze(1), norm='ortho'))
-                return out.unsqueeze(1)
-            fccr_rg = _filt(diff_dct_rg, diff_dst_rg)
-            fccr_gb = _filt(diff_dct_gb, diff_dst_gb)
-            fccr_rb = _filt(diff_dct_rb, diff_dst_rb)
-        else:
-            def _filt(diff_dct):
-                out = td.idct_2d((Mr * Wg) * diff_dct.squeeze(1), norm='ortho')
-                return out.unsqueeze(1)
-            fccr_rg = _filt(diff_dct_rg)
-            fccr_gb = _filt(diff_dct_gb)
-            fccr_rb = _filt(diff_dct_rb)
-        fccr_feat = torch.cat([fccr_rg, fccr_gb, fccr_rb], dim=1)  # (B,3,H,W)
-        return fccr_feat
+        diff_rg = r - g
+        diff_gb = g - b
+        diff_rb = r - b
+        diffs = torch.cat([diff_rg, diff_gb, diff_rb], dim=1)
+        return self.whiten(x, diffs)
 
 
 class FIINet(nn.Module):
-    """与 FFT 原版 FIINet 结构完全一致, 仅 fim 换成 LearnableDCTEnergyFilter."""
+    """与 FFT 原版 FIINet 结构一致, fim 换 LearnableMinimalGlobalFilter, 输出 +x 残差."""
 
     def __init__(self, number_K, lamda):
         super(FIINet, self).__init__()
@@ -248,7 +109,7 @@ class FIINet(nn.Module):
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)
                                         ])
-        self.fim = LearnableDCTEnergyFilter(number_K, lamda)
+        self.fim = LearnableMinimalGlobalFilter(number_K, lamda)
 
     def forward(self, x):
         feat_f = self.fim(x)
@@ -256,4 +117,6 @@ class FIINet(nn.Module):
         feat_spectral = self.spectral_net(feat_f)
         feat_agg = torch.concat((feat_spatial, feat_spectral), dim=1)
         x_out = self.fuse_net(feat_agg)
+        if not NO_RESIDUAL:
+            x_out = x_out + x
         return x_out
