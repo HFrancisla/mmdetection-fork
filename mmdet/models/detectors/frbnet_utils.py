@@ -1,3 +1,4 @@
+import os
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
@@ -107,6 +108,92 @@ class LearnableDWT3Filter(nn.Module):
         if pad_h or pad_w:
             out = out[:, :, :h, :w]
         return out
+
+
+class LearnableDWT3FilterOnlyLL(nn.Module):
+    """V9-OnlyLL: 三级 Haar DWT，**只处理 LL 层级**，9 个细节带（LH/HL/HH × 3 级）raw 直通 IDWT。
+
+    语义（由 DWT/IDWT 线性性）：out = x + Σ_k (ΔLL_k 经逐级 IDWT 摊回整图的低频修正场)，
+    因此 x 的全部细节内容被原样保留（可数值验证：DWT(out) 的 9 个细节带 == DWT(x) 的细节带，
+    元素级相等）；模块输出只叠加平滑的低频/颜色修正。与 V9 三通路对比：无中/高频增益、无 HH 收缩。
+
+    LL 处理（白平衡仿射，作用于逐级重建出的近似 LL 带，重建链上做）：
+        ll_k 去均值(挖 DC/色偏) -> 通道差 _diff -> a_k·d + b_k
+    细节带全程 raw：每级 IDWT 的 LH/HL/HH 槽直接取原始子带系数。
+
+    环境开关（train/test 必须同 env，见设计文档）：
+        FRBNET_V9_LL_LEVELS          '3'(默认) | '12' | '123' | '1' | '2'   处理哪些层级
+        FRBNET_V9_ONLYLL_ZERO_DETAIL '1' -> 9 个细节槽置 0（对照臂：等价于 V9 设计文档
+                                      §5.4 NO_MID + NO_HI 的"置零"口径，输出≈纯低通）
+
+    参数：6 × #启用层级（默认仅 LL3 = 6 个；全三级 = 18 个）。初值 a=0.3（每通道差增益），b=0。
+    不变量（训练前数值验证全过）：常数图->输出 0（b=0 初值）/ 乘性光照不变 / 去均值去色偏 /
+    细节带原样保留；a=b=0 时不是恒等映射（LL 槽有界修正），这是设计使然。
+    """
+
+    def __init__(self):
+        super().__init__()
+        levels = os.environ.get('FRBNET_V9_LL_LEVELS', '3').strip()
+        self.enable1 = '1' in levels
+        self.enable2 = '2' in levels
+        self.enable3 = '3' in levels
+        if not (self.enable1 or self.enable2 or self.enable3):
+            raise ValueError(
+                'FRBNET_V9_LL_LEVELS must enable at least one of {1,2,3}, got: %r' % levels)
+        self.zero_detail = os.environ.get('FRBNET_V9_ONLYLL_ZERO_DETAIL', '0') == '1'
+        self.dwt = DWT_2D()
+        self.idwt = IDWT_2D()
+        if self.enable3:
+            self.a3 = nn.Parameter(torch.tensor([0.3, 0.3, 0.3]))
+            self.b3 = nn.Parameter(torch.zeros(3))
+        if self.enable2:
+            self.a2 = nn.Parameter(torch.tensor([0.3, 0.3, 0.3]))
+            self.b2 = nn.Parameter(torch.zeros(3))
+        if self.enable1:
+            self.a1 = nn.Parameter(torch.tensor([0.3, 0.3, 0.3]))
+            self.b1 = nn.Parameter(torch.zeros(3))
+
+    @staticmethod
+    def _wb(sub, a, b):
+        """白平衡仿射: 去均值(挖 DC/色偏) -> 通道差 -> a·d + b。返回 (B,3,H',W')。"""
+        sub_c = sub - sub.mean(dim=(2, 3), keepdim=True)
+        r, g, bl = sub_c[:, 0:1], sub_c[:, 1:2], sub_c[:, 2:3]
+        d = torch.cat([r - g, g - bl, r - bl], dim=1)
+        return d * a.view(1, 3, 1, 1) + b.view(1, 3, 1, 1)
+
+    def forward(self, img):
+        b, c, h, w = img.shape
+        assert c == 3
+        pad_h = (-h) % 8
+        pad_w = (-w) % 8
+        x = torch.log(img.clamp(min=1e-6))
+        if pad_h or pad_w:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+
+        # ---- 三级分解: 10 子带（与 V9 相同，只用于取系数）----
+        d1 = self.dwt(x); ll1, lh1, hl1, hh1 = d1.chunk(4, dim=1)
+        d2 = self.dwt(ll1); ll2, lh2, hl2, hh2 = d2.chunk(4, dim=1)
+        d3 = self.dwt(ll2); ll3, lh3, hl3, hh3 = d3.chunk(4, dim=1)
+
+        # ---- 对照臂: 9 个细节槽置 0（等价 V9 设计文档 §5.4 NO_MID+NO_HI 置零口径）----
+        if self.zero_detail:
+            lh1 = torch.zeros_like(lh1); hl1 = torch.zeros_like(hl1); hh1 = torch.zeros_like(hh1)
+            lh2 = torch.zeros_like(lh2); hl2 = torch.zeros_like(hl2); hh2 = torch.zeros_like(hh2)
+            lh3 = torch.zeros_like(lh3); hl3 = torch.zeros_like(hl3); hh3 = torch.zeros_like(hh3)
+
+        # ---- LL 处理（仅白平衡仿射；细节带全程 raw 或置 0）----
+        ll3_o = self._wb(ll3, self.a3, self.b3) if self.enable3 else ll3
+        ll2_r = self.idwt(torch.cat([ll3_o, lh3, hl3, hh3], dim=1))
+        ll2_o = self._wb(ll2_r, self.a2, self.b2) if self.enable2 else ll2_r
+        ll1_r = self.idwt(torch.cat([ll2_o, lh2, hl2, hh2], dim=1))
+        ll1_o = self._wb(ll1_r, self.a1, self.b1) if self.enable1 else ll1_r
+
+        out = self.idwt(torch.cat([ll1_o, lh1, hl1, hh1], dim=1))
+        if pad_h or pad_w:
+            out = out[:, :, :h, :w]
+        return out
+
+
 class RadialBasisFilter(nn.Module):
     """FFT radial-basis filter (kept for F0 reference)."""
 
@@ -222,7 +309,8 @@ class LearnableDWTFilter(nn.Module):
 
 
 class FIINet(nn.Module):
-    """FIINet with V6 two-level DWT filter (FIM)."""
+    """FIINet with V9-OnlyLL filter (FIM) — 本分支装配 LearnableDWT3FilterOnlyLL。
+    对比装配（历史）：V9 三通路 = LearnableDWT3Filter（36 参）；本分支 = OnlyLL（6~18 参）。"""
 
     def __init__(self, number_K, lamda):
         super(FIINet, self).__init__()
@@ -236,7 +324,7 @@ class FIINet(nn.Module):
                                         nn.BatchNorm2d(32),
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
-        self.fim = LearnableDWT3Filter()
+        self.fim = LearnableDWT3FilterOnlyLL()
 
     def forward(self, x):
         feat_f = self.fim(x)
