@@ -111,20 +111,24 @@ class LearnableDWT3Filter(nn.Module):
 
 
 class LearnableDWT3FilterOnlyLL(nn.Module):
-    """V9-OnlyLL: 三级 Haar DWT，**只处理 LL 层级**，9 个细节带（LH/HL/HH × 3 级）raw 直通 IDWT。
+    """V9-Depth: 深度对照版 OnlyLL —— 按层级截断分解深度（真·一级/二级/三级 DWT）。
+
+    与 fii-dwt-v9-only-ll 的关系：本分支唯一改动 = DWT 分解深度跟随 FRBNET_V9_LL_LEVELS
+    截断（例如 LEVELS='1' 时只做一级分解 + LL1 白平衡 + 一级重建，不再多余分解到三级）。
+    由 Haar 完美重建保证：新路径与"三级分解但只处理对应层"数值等价（浮点误差级），
+    —— 对照实验唯一变量是分解深度（修正场尺度 2×2 / 4×4 / 8×8）。
 
     语义（由 DWT/IDWT 线性性）：out = x + Σ_k (ΔLL_k 经逐级 IDWT 摊回整图的低频修正场)，
-    因此 x 的全部细节内容被原样保留（可数值验证：DWT(out) 的 9 个细节带 == DWT(x) 的细节带，
-    元素级相等）；模块输出只叠加平滑的低频/颜色修正。与 V9 三通路对比：无中/高频增益、无 HH 收缩。
+    因此 x 的全部细节内容被原样保留（可数值验证：DWT(out) 细节带 == DWT(x) 细节带）；
+    模块输出只叠加平滑的低频/颜色修正。与 V9 三通路对比：无中/高频增益、无 HH 收缩。
 
-    LL 处理（白平衡仿射，作用于逐级重建出的近似 LL 带，重建链上做）：
-        ll_k 去均值(挖 DC/色偏) -> 通道差 _diff -> a_k·d + b_k
+    LL 处理（白平衡仿射，作用于逐级重建出的近似 LL 带）：
+        ll_k 去均值(挖 DC/色偏) -> 通道差 _diff -> a_k·d + b_k     （每启用级 6 参）
     细节带全程 raw：每级 IDWT 的 LH/HL/HH 槽直接取原始子带系数。
 
     环境开关（train/test 必须同 env，见设计文档）：
         FRBNET_V9_LL_LEVELS          '3'(默认) | '12' | '123' | '1' | '2'   处理哪些层级
-        FRBNET_V9_ONLYLL_ZERO_DETAIL '1' -> 9 个细节槽置 0（对照臂：等价于 V9 设计文档
-                                      §5.4 NO_MID + NO_HI 的"置零"口径，输出≈纯低通）
+        FRBNET_V9_ONLYLL_ZERO_DETAIL '1' -> 已分解的细节槽置 0（对照臂，输出≈纯低通）
 
     参数：6 × #启用层级（默认仅 LL3 = 6 个；全三级 = 18 个）。初值 a=0.3（每通道差增益），b=0。
     不变量（训练前数值验证全过）：常数图->输出 0（b=0 初值）/ 乘性光照不变 / 去均值去色偏 /
@@ -170,24 +174,38 @@ class LearnableDWT3FilterOnlyLL(nn.Module):
         if pad_h or pad_w:
             x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
 
-        # ---- 三级分解: 10 子带（与 V9 相同，只用于取系数）----
+        # ---- 分解：深度 = 最高启用的层级（'1'→1级 / '2'·'12'→2级 / '3'·'123'→3级）----
         d1 = self.dwt(x); ll1, lh1, hl1, hh1 = d1.chunk(4, dim=1)
-        d2 = self.dwt(ll1); ll2, lh2, hl2, hh2 = d2.chunk(4, dim=1)
-        d3 = self.dwt(ll2); ll3, lh3, hl3, hh3 = d3.chunk(4, dim=1)
+        if self.enable2 or self.enable3:
+            d2 = self.dwt(ll1); ll2, lh2, hl2, hh2 = d2.chunk(4, dim=1)
+        else:
+            ll2 = lh2 = hl2 = hh2 = None
+        if self.enable3:
+            d3 = self.dwt(ll2); ll3, lh3, hl3, hh3 = d3.chunk(4, dim=1)
+        else:
+            ll3 = lh3 = hl3 = hh3 = None
 
-        # ---- 对照臂: 9 个细节槽置 0（等价 V9 设计文档 §5.4 NO_MID+NO_HI 置零口径）----
+        # ---- 对照臂: 已分解的细节槽置 0（等价 V9 设计文档 §5.4 NO_MID+NO_HI 置零口径）----
         if self.zero_detail:
             lh1 = torch.zeros_like(lh1); hl1 = torch.zeros_like(hl1); hh1 = torch.zeros_like(hh1)
-            lh2 = torch.zeros_like(lh2); hl2 = torch.zeros_like(hl2); hh2 = torch.zeros_like(hh2)
-            lh3 = torch.zeros_like(lh3); hl3 = torch.zeros_like(hl3); hh3 = torch.zeros_like(hh3)
+            if self.enable2 or self.enable3:
+                lh2 = torch.zeros_like(lh2); hl2 = torch.zeros_like(hl2); hh2 = torch.zeros_like(hh2)
+            if self.enable3:
+                lh3 = torch.zeros_like(lh3); hl3 = torch.zeros_like(hl3); hh3 = torch.zeros_like(hh3)
 
-        # ---- LL 处理（仅白平衡仿射；细节带全程 raw 或置 0）----
-        ll3_o = self._wb(ll3, self.a3, self.b3) if self.enable3 else ll3
-        ll2_r = self.idwt(torch.cat([ll3_o, lh3, hl3, hh3], dim=1))
-        ll2_o = self._wb(ll2_r, self.a2, self.b2) if self.enable2 else ll2_r
-        ll1_r = self.idwt(torch.cat([ll2_o, lh2, hl2, hh2], dim=1))
+        # ---- LL 处理 + 逐级重建（细节带全程 raw 或置 0）----
+        if self.enable3:
+            ll3_o = self._wb(ll3, self.a3, self.b3)
+            ll2_r = self.idwt(torch.cat([ll3_o, lh3, hl3, hh3], dim=1))
+            ll2_o = self._wb(ll2_r, self.a2, self.b2) if self.enable2 else ll2_r
+            ll1_r = self.idwt(torch.cat([ll2_o, lh2, hl2, hh2], dim=1))
+        elif self.enable2:
+            ll2_o = self._wb(ll2, self.a2, self.b2)
+            ll1_r = self.idwt(torch.cat([ll2_o, lh2, hl2, hh2], dim=1))
+        else:  # enable1 必真（__init__ 已校验至少启用一层）
+            ll1_r = ll1
+
         ll1_o = self._wb(ll1_r, self.a1, self.b1) if self.enable1 else ll1_r
-
         out = self.idwt(torch.cat([ll1_o, lh1, hl1, hh1], dim=1))
         if pad_h or pad_w:
             out = out[:, :, :h, :w]
