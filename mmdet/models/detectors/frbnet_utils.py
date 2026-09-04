@@ -212,6 +212,49 @@ class LearnableDWT3FilterOnlyLL(nn.Module):
         return out
 
 
+class LearnableFreFilterOnlyDC(nn.Module):
+    """FFT-DC 最简形态：log 域 → rfft2 → 仅 DC 系数通道差白平衡 a·d+b → irfft2。
+
+    与 DWT (1,raw)（LearnableDWT3FilterOnlyLL, LL_LEVELS='1'）结构同构：
+        变换 → 挖 DC/通道差 → a·d + b（6 参）→ 反变换,细节系数全程原样保留。
+    唯一差异：修正场尺度 —— DWT 一级 LL = 2×2 分块常数场；FFT 整图 DC = 1×1 全图常数场。
+    由 FFT 线性性：out ≈ x_log + (a·d + b)（log 域逐通道常数）,其中
+        d = [mean_r−mean_g, mean_g−mean_b, mean_r−mean_b]（log 域全图均值差）,
+    即经典“灰度世界”白平衡的 log 域可学习版 —— 全局色偏修正（乘性光照 R·L → log R + log L，
+    光照常数项被通道差抵消）。细节保留：非 DC 频点系数不动 → DWT(out) 细节带全等。
+    参数：6（a×3 + b×3,初值 0.3/0,与 OnlyLL 一致）。
+    装配：FIINet env 开关 FRBNET_FIM=fft_dc（train/test 必须同 env）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.a = nn.Parameter(torch.tensor([0.3, 0.3, 0.3]))
+        self.b = nn.Parameter(torch.zeros(3))
+
+    def forward(self, img):
+        B, C, H, W = img.shape
+        assert C == 3
+        x = torch.log(img.clamp(min=1e-6))
+        out_chs = []
+        for c in range(3):
+            f = torch.fft.rfft2(x[:, c:c + 1])
+            dc = f[..., 0, 0]                      # (B,1) 复数,无 norm: DC = Σ x
+            f[..., 0, 0] = dc                      # 占位,真实更新在下方通道差之后
+            out_chs.append((f, dc))
+        dc_r, dc_g, dc_b = out_chs[0][1], out_chs[1][1], out_chs[2][1]
+        # 通道差（标量；DC=Σx=N·均值,先归一回均值域,与 OnlyLL 的 sub.mean() 语义一致；
+        # DC 无“空间均值”可去——DWT 版对 ll 图去均值等价于扣每通道 DC,FFT 版 DC 是标量,去均值即减自身）
+        d = torch.cat([dc_r.real - dc_g.real, dc_g.real - dc_b.real, dc_r.real - dc_b.real], dim=1) / (H * W)
+        delta = d * self.a.view(1, 3) + self.b.view(1, 3)   # (B,3),(·,log 域标量)
+        outs = []
+        for c in range(3):
+            f_c, _ = out_chs[c]
+            # 空域加常数 delta_c  <=>  DC(无 norm,=Σx) 加 delta_c·(H·W)
+            f_c[..., 0, 0] = f_c[..., 0, 0] + delta[:, c:c + 1] * (H * W)
+            outs.append(torch.fft.irfft2(f_c, s=(H, W)))
+        return torch.cat(outs, dim=1)
+
+
 class RadialBasisFilter(nn.Module):
     """FFT radial-basis filter (kept for F0 reference)."""
 
@@ -327,8 +370,9 @@ class LearnableDWTFilter(nn.Module):
 
 
 class FIINet(nn.Module):
-    """FIINet with V9-OnlyLL filter (FIM) — 本分支装配 LearnableDWT3FilterOnlyLL。
-    对比装配（历史）：V9 三通路 = LearnableDWT3Filter（36 参）；本分支 = OnlyLL（6~18 参）。"""
+    """FIINet with FIM 可装配变体 — 本分支支持: DWT OnlyLL（默认）/ FFT-DC 最简。
+    装配: env FRBNET_FIM = 'dwt_onlyll'（默认）| 'fft_dc'（train/test 必须同 env）。
+    对比装配（历史）: V9 三通路 = LearnableDWT3Filter（36 参）；OnlyLL = 6~18 参；FFT-DC = 6 参。"""
 
     def __init__(self, number_K, lamda):
         super(FIINet, self).__init__()
@@ -342,7 +386,8 @@ class FIINet(nn.Module):
                                         nn.BatchNorm2d(32),
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
-        self.fim = LearnableDWT3FilterOnlyLL()
+        use_fft_dc = os.environ.get('FRBNET_FIM', 'dwt_onlyll').strip() == 'fft_dc'
+        self.fim = LearnableFreFilterOnlyDC() if use_fft_dc else LearnableDWT3FilterOnlyLL()
 
     def forward(self, x):
         feat_f = self.fim(x)
