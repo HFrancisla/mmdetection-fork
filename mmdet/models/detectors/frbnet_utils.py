@@ -1,4 +1,5 @@
 import os
+import math
 import torch.nn.functional as F
 import torch.nn as nn
 import torch
@@ -255,6 +256,48 @@ class LearnableFreFilterOnlyDC(nn.Module):
         return torch.cat(outs, dim=1)
 
 
+def _dct2_matrix(n, device=None, dtype=None):
+    """正交 DCT-II 矩阵 C (n×n): C[k,n] = α_k·cos(π(2n+1)k/2N),
+    α_0=√(1/N), α_k=√(2/N)。2D DCT: F = C @ X @ Cᵀ; IDCT: X = Cᵀ @ F @ C。"""
+    dtype = dtype or torch.float32
+    k = torch.arange(n, device=device, dtype=dtype)
+    i = torch.arange(n, device=device, dtype=dtype)
+    C = torch.cos(math.pi / n * (i[None, :] + 0.5) * k[:, None])
+    C[0] *= math.sqrt(0.5)
+    return C * math.sqrt(2.0 / n)
+
+
+class LearnableDCTFilterOnlyDC(nn.Module):
+    """DCT-DC 最简形态：log 域 → 整图 2D DCT → 仅 DC 系数通道差白平衡 a·d+b → IDCT。
+
+    与 FFT-DC（LearnableFreFilterOnlyDC）/ DWT (1,raw) 逐环节同构，仅换基为余弦基：
+        正交 DCT-II 的 DC 系数 = 全图均值（X[0,0] = α₀²·Σx = mean）→ 与 FFT-DC 同口经
+        d = [mean_r−mean_g, mean_g−mean_b, mean_r−mean_b]（log 域全图均值差）
+        Δ = a·d + b（6 参,初值 0.3/0）→ X'[0,0] += Δ·N（正交 DCT 归一）→ IDCT
+        （IDCT(仅 DC 改动 Δ·N) = 常数场 Δ，故空域 out = x_log + Δ，与 FFT-DC 逐字同口径）
+    修正场尺度 1×1（全图常数）：IDCT(仅 DC 改动) = 常数场
+        → out = x_log + Δ（严格数学等价,由 DCT 线性性；性能上无需算全变换）。
+    AC 系数（细节/纹理）全程 raw：IDCT 后非 DC 频率成分原样 = 输入。
+    数值验证（_tmp/dct_dc_verify.py）：full-DCT 路径 ≡ DC-only 路径 < 1e-6。
+    参数：6（a×3 + b×3）。装配：FIINet env 开关 FRBNET_FIM=dct_dc。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.a = nn.Parameter(torch.tensor([0.3, 0.3, 0.3]))
+        self.b = nn.Parameter(torch.zeros(3))
+
+    def forward(self, img):
+        B, C, H, W = img.shape
+        assert C == 3
+        x = torch.log(img.clamp(min=1e-6))
+        m = x.mean(dim=(2, 3), keepdim=True)               # (B,3,1,1) = DCT DC 系数
+        r, g, b = m[:, 0:1], m[:, 1:2], m[:, 2:3]
+        d = torch.cat([r - g, g - b, r - b], dim=1)        # (B,3,1,1)
+        delta = d * self.a.view(1, 3, 1, 1) + self.b.view(1, 3, 1, 1)
+        return x + delta                                    # IDCT(仅 DC 改动) = 常数场
+
+
 class RadialBasisFilter(nn.Module):
     """FFT radial-basis filter (kept for F0 reference)."""
 
@@ -370,9 +413,9 @@ class LearnableDWTFilter(nn.Module):
 
 
 class FIINet(nn.Module):
-    """FIINet with FIM 可装配变体 — 本分支支持: DWT OnlyLL（默认）/ FFT-DC 最简。
-    装配: env FRBNET_FIM = 'dwt_onlyll'（默认）| 'fft_dc'（train/test 必须同 env）。
-    对比装配（历史）: V9 三通路 = LearnableDWT3Filter（36 参）；OnlyLL = 6~18 参；FFT-DC = 6 参。"""
+    """FIINet with FIM 可装配变体 — 本分支支持: DWT OnlyLL（默认）/ FFT-DC / DCT-DC 最简。
+    装配: env FRBNET_FIM = 'dwt_onlyll'（默认）| 'fft_dc' | 'dct_dc'（train/test 必须同 env）。
+    对比装配（历史）: V9 三通路 = LearnableDWT3Filter（36 参）；OnlyLL = 6~18 参；FFT-DC = 6 参；DCT-DC = 6 参。"""
 
     def __init__(self, number_K, lamda):
         super(FIINet, self).__init__()
@@ -386,8 +429,13 @@ class FIINet(nn.Module):
                                         nn.BatchNorm2d(32),
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
-        use_fft_dc = os.environ.get('FRBNET_FIM', 'dwt_onlyll').strip() == 'fft_dc'
-        self.fim = LearnableFreFilterOnlyDC() if use_fft_dc else LearnableDWT3FilterOnlyLL()
+        fim = os.environ.get('FRBNET_FIM', 'dwt_onlyll').strip()
+        if fim == 'fft_dc':
+            self.fim = LearnableFreFilterOnlyDC()
+        elif fim == 'dct_dc':
+            self.fim = LearnableDCTFilterOnlyDC()
+        else:
+            self.fim = LearnableDWT3FilterOnlyLL()
 
     def forward(self, x):
         feat_f = self.fim(x)
