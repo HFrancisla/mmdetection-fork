@@ -100,6 +100,7 @@ class FreqDetDataPreprocessor(DetDataPreprocessor):
     def __init__(self,
                  frontend_mode: str,
                  frontend_eps: float = 1e-6,
+                 frontend_init_seed: int = 6,
                  bgr_to_rgb: bool = False,
                  rgb_to_bgr: bool = False,
                  **kwargs) -> None:
@@ -111,6 +112,7 @@ class FreqDetDataPreprocessor(DetDataPreprocessor):
             bgr_to_rgb=bgr_to_rgb, rgb_to_bgr=rgb_to_bgr, **kwargs)
         self.frontend_mode = frontend_mode
         self.frontend_eps = frontend_eps
+        self.frontend_init_seed = frontend_init_seed
         self._input_is_bgr = bgr_to_rgb
         self._input_is_rgb = rgb_to_bgr
 
@@ -124,8 +126,14 @@ class FreqDetDataPreprocessor(DetDataPreprocessor):
             self.post_frontend: Optional[nn.Module] = None
         elif frontend_mode in _AttributionWrapper._WRAPPER_MODES:
             self.physical_frontend = None
-            self.post_frontend = _AttributionWrapper(frontend_mode,
-                                                     frontend_eps)
+            # The detector checkpoint cannot load its 80-class classification
+            # layer into the 12-class ExDark head. Keep that randomly
+            # initialized detector layer exactly paired with the baseline by
+            # preventing front-end construction from advancing global RNG.
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(frontend_init_seed)
+                self.post_frontend = _AttributionWrapper(
+                    frontend_mode, frontend_eps)
         else:
             self.physical_frontend = None
             self.post_frontend = None

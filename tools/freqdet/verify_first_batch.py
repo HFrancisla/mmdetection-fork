@@ -108,11 +108,37 @@ def verify_configs() -> None:
         print(f'{experiment_id}: OK, frontend_params={actual_params}')
 
 
+def verify_detector_rng_isolation() -> None:
+    keys = (
+        'backbone.conv1.weight',
+        'bbox_head.tood_cls.weight',
+        'bbox_head.tood_reg.weight',
+    )
+
+    def build_signature(path: str):
+        torch.manual_seed(6)
+        model = MODELS.build(Config.fromfile(path).model)
+        parameters = dict(model.named_parameters())
+        return {key: parameters[key].detach().clone() for key in keys}
+
+    baseline = build_signature(CONFIGS['FD-B01'][0])
+    for experiment_id in ('FD-G02', 'FD-G03', 'FD-G04', 'FD-G05'):
+        candidate = build_signature(CONFIGS[experiment_id][0])
+        for key in keys:
+            if not torch.equal(candidate[key], baseline[key]):
+                error = (candidate[key] - baseline[key]).abs().max().item()
+                raise AssertionError(
+                    f'{experiment_id}: detector RNG shifted at {key}; '
+                    f'max_error={error}')
+        print(f'{experiment_id}: detector RNG isolation OK')
+
+
 def main() -> None:
     register_all_modules()
     identity_error = verify_identity()
     print(f'physical_adapter_zero_param_max_error={identity_error:.9g}')
     verify_configs()
+    verify_detector_rng_isolation()
     print('first-batch preflight: PASS')
 
 
