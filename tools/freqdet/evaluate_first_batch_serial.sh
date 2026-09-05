@@ -9,9 +9,11 @@ RESULTS_ROOT="$WORKSPACE_ROOT/FreqDet_results"
 EXPECTED_BRANCH="freqdet/sfoc6-validation"
 GPU_ID="${GPU_ID:-0}"
 BATCH_TAG="${1:?Usage: GPU_ID=0 $0 <BATCH_TAG>}"
-BATCH_ROOT="$REPO_ROOT/work_dirs/freqdet/first_batch_seed6/$BATCH_TAG"
+BATCH_ROOT="$REPO_ROOT/work_dirs/freqdet/first_batch_3seeds/$BATCH_TAG"
 MANIFEST_DIR="$RESULTS_ROOT/00_protocol/manifests"
-MANIFEST="$MANIFEST_DIR/first_batch_test_${BATCH_TAG}.tsv"
+MANIFEST="$MANIFEST_DIR/first_batch_3seeds_test_${BATCH_TAG}.tsv"
+
+SEEDS=(6 2025 2026)
 
 EXPERIMENTS=("FD-B01" "FD-G02" "FD-G03" "FD-G04" "FD-G05")
 CONFIG_NAMES=(
@@ -32,6 +34,9 @@ test "$(git branch --show-current)" = "$EXPECTED_BRANCH" || \
   die "expected branch $EXPECTED_BRANCH"
 test -x "$PYTHON_BIN" || die "project Python not found: $PYTHON_BIN"
 test -d "$BATCH_ROOT" || die "training batch not found: $BATCH_ROOT"
+test "${#EXPERIMENTS[@]}" -eq "${#CONFIG_NAMES[@]}" || \
+  die "EXPERIMENTS and CONFIG_NAMES length mismatch"
+test ! -e "$MANIFEST" || die "test manifest already exists: $MANIFEST"
 
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -45,40 +50,43 @@ assert torch.cuda.device_count() == 1, torch.cuda.device_count()
 print('visible_gpu', torch.cuda.get_device_name(0))
 PY
 
-printf 'experiment_id\truntime_config\tcheckpoint\tstarted_at\tended_at\tstatus\n' \
+printf 'run_id\texperiment_id\tseed\truntime_config\tcheckpoint\tstarted_at\tended_at\tstatus\n' \
   > "$MANIFEST"
 
-for index in "${!EXPERIMENTS[@]}"; do
-  experiment_id="${EXPERIMENTS[$index]}"
-  run_dir="$BATCH_ROOT/${experiment_id,,}"
-  runtime_config="$run_dir/${CONFIG_NAMES[$index]}"
-  checkpoint="$run_dir/epoch_24.pth"
-  test_dir="$run_dir/test_epoch24"
-  started_at="$(date --iso-8601=seconds)"
+for seed in "${SEEDS[@]}"; do
+  for index in "${!EXPERIMENTS[@]}"; do
+    experiment_id="${EXPERIMENTS[$index]}"
+    run_id="${experiment_id}-s${seed}"
+    run_dir="$BATCH_ROOT/seed${seed}/${experiment_id,,}"
+    runtime_config="$run_dir/${CONFIG_NAMES[$index]}"
+    checkpoint="$run_dir/epoch_24.pth"
+    test_dir="$run_dir/test_epoch24"
+    started_at="$(date --iso-8601=seconds)"
 
-  test -f "$runtime_config" || die "missing dumped config: $runtime_config"
-  test -f "$checkpoint" || die "missing final checkpoint: $checkpoint"
-  test ! -e "$test_dir" || die "test output already exists: $test_dir"
-  mkdir -p "$test_dir"
+    test -f "$runtime_config" || die "missing dumped config: $runtime_config"
+    test -f "$checkpoint" || die "missing final checkpoint: $checkpoint"
+    test ! -e "$test_dir" || die "test output already exists: $test_dir"
+    mkdir -p "$test_dir"
 
-  set +e
-  "$PYTHON_BIN" -u tools/test.py "$runtime_config" "$checkpoint" \
-    --work-dir "$test_dir" --out "$test_dir/predictions.pkl" \
-    2>&1 | tee "$test_dir/launcher.log"
-  test_status=${PIPESTATUS[0]}
-  set -e
-  ended_at="$(date --iso-8601=seconds)"
+    set +e
+    "$PYTHON_BIN" -u tools/test.py "$runtime_config" "$checkpoint" \
+      --work-dir "$test_dir" --out "$test_dir/predictions.pkl" \
+      2>&1 | tee "$test_dir/launcher.log"
+    test_status=${PIPESTATUS[0]}
+    set -e
+    ended_at="$(date --iso-8601=seconds)"
 
-  if test "$test_status" -ne 0; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$experiment_id" "$runtime_config" "$checkpoint" "$started_at" \
-      "$ended_at" "failed:$test_status" >> "$MANIFEST"
-    die "$experiment_id test failed with exit code $test_status"
-  fi
-  printf '%s\t%s\t%s\t%s\t%s\tcompleted\n' \
-    "$experiment_id" "$runtime_config" "$checkpoint" "$started_at" \
-    "$ended_at" >> "$MANIFEST"
+    if test "$test_status" -ne 0; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$run_id" "$experiment_id" "$seed" "$runtime_config" \
+        "$checkpoint" "$started_at" "$ended_at" \
+        "failed:$test_status" >> "$MANIFEST"
+      die "$run_id test failed with exit code $test_status"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tcompleted\n' \
+      "$run_id" "$experiment_id" "$seed" "$runtime_config" \
+      "$checkpoint" "$started_at" "$ended_at" >> "$MANIFEST"
+  done
 done
 
 printf 'All epoch-24 test evaluations completed. Manifest: %s\n' "$MANIFEST"
-

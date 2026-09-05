@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """CPU-side numerical and configuration checks for FreqDet batch one."""
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -31,6 +32,23 @@ CONFIGS = {
         'configs/freqdet/fd_g05_tood_exdark_normalized_logclamp_seed6.py',
         0),
 }
+
+RANDOM_FRONTEND_EXPERIMENTS = {'FD-G02', 'FD-G03'}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--seeds', nargs='+', type=int, default=[6])
+    return parser.parse_args()
+
+
+def load_run_config(experiment_id: str, path: str, seed: int) -> Config:
+    cfg = Config.fromfile(path)
+    overrides = {'randomness.seed': seed}
+    if experiment_id in RANDOM_FRONTEND_EXPERIMENTS:
+        overrides['model.data_preprocessor.frontend_init_seed'] = seed
+    cfg.merge_from_dict(overrides)
+    return cfg
 
 
 def parameter_count(module: torch.nn.Module) -> int:
@@ -63,82 +81,101 @@ def verify_identity() -> float:
     return error
 
 
-def verify_configs() -> None:
+def verify_configs(seeds) -> None:
     sample = dict(
         inputs=[
             torch.randint(1, 256, (3, 37, 41), dtype=torch.uint8),
             torch.randint(1, 256, (3, 35, 45), dtype=torch.uint8),
         ],
         data_samples=None)
-    for experiment_id, (path_string, expected_params) in CONFIGS.items():
-        path = Path(path_string)
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        cfg = Config.fromfile(path)
-        if cfg.model.type != 'TOOD':
-            raise AssertionError(f'{experiment_id}: detector is not TOOD')
-        if cfg.randomness.seed != 6:
-            raise AssertionError(f'{experiment_id}: seed is not 6')
-        if cfg.train_cfg.max_epochs != 24:
-            raise AssertionError(f'{experiment_id}: schedule is not 24 epochs')
-        if cfg.optim_wrapper.type != 'OptimWrapper':
-            raise AssertionError(f'{experiment_id}: experiment is not fp32')
-        preprocessor = MODELS.build(cfg.model.data_preprocessor)
-        actual_params = parameter_count(preprocessor)
-        if actual_params != expected_params:
-            raise AssertionError(
-                f'{experiment_id}: expected {expected_params} front-end '
-                f'parameters, got {actual_params}')
-        output = preprocessor(sample, training=False)['inputs']
-        if output.shape != (2, 3, 64, 64):
-            raise AssertionError(
-                f'{experiment_id}: unexpected output shape {output.shape}')
-        if not torch.isfinite(output).all():
-            raise AssertionError(f'{experiment_id}: output contains NaN/Inf')
-        if actual_params:
-            output.square().mean().backward()
-            for name, parameter in preprocessor.named_parameters():
-                if parameter.requires_grad:
-                    if parameter.grad is None:
-                        raise AssertionError(
-                            f'{experiment_id}: missing gradient for {name}')
-                    if not torch.isfinite(parameter.grad).all():
-                        raise AssertionError(
-                            f'{experiment_id}: non-finite gradient for {name}')
-        print(f'{experiment_id}: OK, frontend_params={actual_params}')
+    for seed in seeds:
+        for experiment_id, (path_string, expected_params) in CONFIGS.items():
+            path = Path(path_string)
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            cfg = load_run_config(experiment_id, path_string, seed)
+            if cfg.model.type != 'TOOD':
+                raise AssertionError(f'{experiment_id}: detector is not TOOD')
+            if cfg.randomness.seed != seed:
+                raise AssertionError(
+                    f'{experiment_id}: expected seed {seed}, '
+                    f'got {cfg.randomness.seed}')
+            if experiment_id in RANDOM_FRONTEND_EXPERIMENTS:
+                if cfg.model.data_preprocessor.frontend_init_seed != seed:
+                    raise AssertionError(
+                        f'{experiment_id}: front-end seed is not {seed}')
+            if cfg.train_cfg.max_epochs != 24:
+                raise AssertionError(
+                    f'{experiment_id}: schedule is not 24 epochs')
+            if cfg.optim_wrapper.type != 'OptimWrapper':
+                raise AssertionError(
+                    f'{experiment_id}: experiment is not fp32')
+            preprocessor = MODELS.build(cfg.model.data_preprocessor)
+            actual_params = parameter_count(preprocessor)
+            if actual_params != expected_params:
+                raise AssertionError(
+                    f'{experiment_id}: expected {expected_params} front-end '
+                    f'parameters, got {actual_params}')
+            output = preprocessor(sample, training=False)['inputs']
+            if output.shape != (2, 3, 64, 64):
+                raise AssertionError(
+                    f'{experiment_id}: unexpected output shape '
+                    f'{output.shape}')
+            if not torch.isfinite(output).all():
+                raise AssertionError(
+                    f'{experiment_id}: output contains NaN/Inf')
+            if actual_params:
+                output.square().mean().backward()
+                for name, parameter in preprocessor.named_parameters():
+                    if parameter.requires_grad:
+                        if parameter.grad is None:
+                            raise AssertionError(
+                                f'{experiment_id}: missing gradient for '
+                                f'{name}')
+                        if not torch.isfinite(parameter.grad).all():
+                            raise AssertionError(
+                                f'{experiment_id}: non-finite gradient for '
+                                f'{name}')
+            print(f'{experiment_id}-s{seed}: OK, '
+                  f'frontend_params={actual_params}')
 
 
-def verify_detector_rng_isolation() -> None:
+def verify_detector_rng_isolation(seeds) -> None:
     keys = (
         'backbone.conv1.weight',
         'bbox_head.tood_cls.weight',
         'bbox_head.tood_reg.weight',
     )
 
-    def build_signature(path: str):
-        torch.manual_seed(6)
-        model = MODELS.build(Config.fromfile(path).model)
+    def build_signature(experiment_id: str, path: str, seed: int):
+        torch.manual_seed(seed)
+        model = MODELS.build(load_run_config(experiment_id, path, seed).model)
         parameters = dict(model.named_parameters())
         return {key: parameters[key].detach().clone() for key in keys}
 
-    baseline = build_signature(CONFIGS['FD-B01'][0])
-    for experiment_id in ('FD-G02', 'FD-G03', 'FD-G04', 'FD-G05'):
-        candidate = build_signature(CONFIGS[experiment_id][0])
-        for key in keys:
-            if not torch.equal(candidate[key], baseline[key]):
-                error = (candidate[key] - baseline[key]).abs().max().item()
-                raise AssertionError(
-                    f'{experiment_id}: detector RNG shifted at {key}; '
-                    f'max_error={error}')
-        print(f'{experiment_id}: detector RNG isolation OK')
+    for seed in seeds:
+        baseline = build_signature('FD-B01', CONFIGS['FD-B01'][0], seed)
+        for experiment_id in ('FD-G02', 'FD-G03', 'FD-G04', 'FD-G05'):
+            candidate = build_signature(
+                experiment_id, CONFIGS[experiment_id][0], seed)
+            for key in keys:
+                if not torch.equal(candidate[key], baseline[key]):
+                    error = (candidate[key] - baseline[key]).abs().max().item()
+                    raise AssertionError(
+                        f'{experiment_id}-s{seed}: detector RNG shifted at '
+                        f'{key}; max_error={error}')
+            print(f'{experiment_id}-s{seed}: detector RNG isolation OK')
 
 
 def main() -> None:
+    args = parse_args()
+    if len(args.seeds) != len(set(args.seeds)):
+        raise ValueError(f'duplicate seeds are not allowed: {args.seeds}')
     register_all_modules()
     identity_error = verify_identity()
     print(f'physical_adapter_zero_param_max_error={identity_error:.9g}')
-    verify_configs()
-    verify_detector_rng_isolation()
+    verify_configs(args.seeds)
+    verify_detector_rng_isolation(args.seeds)
     print('first-batch preflight: PASS')
 
 

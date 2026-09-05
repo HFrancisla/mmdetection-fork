@@ -10,9 +10,13 @@ EXPECTED_BRANCH="freqdet/sfoc6-validation"
 GPU_ID="${GPU_ID:-0}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 DRY_RUN="${DRY_RUN:-0}"
-BATCH_ROOT="$REPO_ROOT/work_dirs/freqdet/first_batch_seed6/$RUN_TAG"
+BATCH_ROOT="$REPO_ROOT/work_dirs/freqdet/first_batch_3seeds/$RUN_TAG"
 MANIFEST_DIR="$RESULTS_ROOT/00_protocol/manifests"
-MANIFEST="$MANIFEST_DIR/first_batch_seed6_${RUN_TAG}.tsv"
+MANIFEST="$MANIFEST_DIR/first_batch_3seeds_${RUN_TAG}.tsv"
+
+# Locked by FreqDet_results/00_protocol/protocol_lock.md.  Keep the baseline
+# and every candidate paired on exactly the same three seeds.
+SEEDS=(6 2025 2026)
 
 EXPERIMENTS=(
   "FD-B01"
@@ -27,6 +31,13 @@ CONFIGS=(
   "configs/freqdet/fd_g03_tood_exdark_wrapper_zero_seed6.py"
   "configs/freqdet/fd_g04_tood_exdark_physical_dc6_seed6.py"
   "configs/freqdet/fd_g05_tood_exdark_normalized_logclamp_seed6.py"
+)
+RANDOM_FRONTENDS=(
+  "0"
+  "1"
+  "1"
+  "0"
+  "0"
 )
 
 die() {
@@ -46,6 +57,10 @@ test "$current_branch" = "$EXPECTED_BRANCH" || \
 for config in "${CONFIGS[@]}"; do
   test -f "$config" || die "missing config: $config"
 done
+test "${#EXPERIMENTS[@]}" -eq "${#CONFIGS[@]}" || \
+  die "EXPERIMENTS and CONFIGS length mismatch"
+test "${#EXPERIMENTS[@]}" -eq "${#RANDOM_FRONTENDS[@]}" || \
+  die "EXPERIMENTS and RANDOM_FRONTENDS length mismatch"
 
 if test -e "$BATCH_ROOT"; then
   die "batch directory already exists; choose another RUN_TAG: $BATCH_ROOT"
@@ -67,9 +82,11 @@ dirty="$(test -n "$(git status --porcelain)" && echo 1 || echo 0)"
   printf 'commit\t%s\n' "$commit"
   printf 'git_dirty\t%s\n' "$dirty"
   printf 'gpu_id\t%s\n' "$GPU_ID"
+  printf 'seeds\t%s\n' "${SEEDS[*]}"
+  printf 'run_count\t%s\n' "$((${#SEEDS[@]} * ${#EXPERIMENTS[@]}))"
   printf 'batch_root\t%s\n' "$BATCH_ROOT"
   printf 'created_at\t%s\n' "$(date --iso-8601=seconds)"
-  printf 'experiment_id\tconfig\twork_dir\tstarted_at\tended_at\tstatus\n'
+  printf 'run_id\texperiment_id\tseed\tconfig\twork_dir\tcommit\tstarted_at\tended_at\tstatus\n'
 } > "$MANIFEST"
 
 "$PYTHON_BIN" - <<'PY' || die "project environment import check failed"
@@ -83,7 +100,7 @@ print('mmcv', mmcv.__version__)
 print('mmdet', mmdet.__version__)
 PY
 
-"$PYTHON_BIN" tools/freqdet/verify_first_batch.py || \
+"$PYTHON_BIN" tools/freqdet/verify_first_batch.py --seeds "${SEEDS[@]}" || \
   die "first-batch numerical/configuration preflight failed"
 
 if test "$DRY_RUN" != "1"; then
@@ -101,39 +118,55 @@ printf '%s\n' "Batch root: $BATCH_ROOT"
 printf '%s\n' "Manifest: $MANIFEST"
 printf '%s\n' "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 
-for index in "${!EXPERIMENTS[@]}"; do
-  experiment_id="${EXPERIMENTS[$index]}"
-  config="${CONFIGS[$index]}"
-  run_dir="$BATCH_ROOT/${experiment_id,,}"
-  started_at="$(date --iso-8601=seconds)"
+for seed in "${SEEDS[@]}"; do
+  for index in "${!EXPERIMENTS[@]}"; do
+    test "$(git branch --show-current)" = "$EXPECTED_BRANCH" || \
+      die "branch changed while the batch was running"
+    test "$(git rev-parse HEAD)" = "$commit" || \
+      die "commit changed while the batch was running"
+    experiment_id="${EXPERIMENTS[$index]}"
+    config="${CONFIGS[$index]}"
+    run_id="${experiment_id}-s${seed}"
+    run_dir="$BATCH_ROOT/seed${seed}/${experiment_id,,}"
+    run_commit="$(git rev-parse HEAD)"
+    started_at="$(date --iso-8601=seconds)"
+    cfg_options=("randomness.seed=$seed")
+    if test "${RANDOM_FRONTENDS[$index]}" = "1"; then
+      cfg_options+=("model.data_preprocessor.frontend_init_seed=$seed")
+    fi
 
-  printf '\n[%s] %s -> %s\n' "$(date '+%F %T')" "$experiment_id" "$run_dir"
-  if test "$DRY_RUN" = "1"; then
-    "$PYTHON_BIN" tools/misc/print_config.py "$config" >/dev/null
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$experiment_id" "$config" "$run_dir" "$started_at" \
-      "$(date --iso-8601=seconds)" "dry-run" >> "$MANIFEST"
-    continue
-  fi
+    printf '\n[%s] %s -> %s\n' "$(date '+%F %T')" "$run_id" "$run_dir"
+    if test "$DRY_RUN" = "1"; then
+      "$PYTHON_BIN" tools/misc/print_config.py "$config" \
+        --cfg-options "${cfg_options[@]}" >/dev/null
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$run_id" "$experiment_id" "$seed" "$config" "$run_dir" \
+        "$run_commit" "$started_at" "$(date --iso-8601=seconds)" \
+        "dry-run" >> "$MANIFEST"
+      continue
+    fi
 
-  mkdir -p "$run_dir"
-  set +e
-  "$PYTHON_BIN" -u tools/train.py "$config" --work-dir "$run_dir" \
-    2>&1 | tee "$run_dir/launcher.log"
-  train_status=${PIPESTATUS[0]}
-  set -e
-  ended_at="$(date --iso-8601=seconds)"
+    mkdir -p "$run_dir"
+    set +e
+    "$PYTHON_BIN" -u tools/train.py "$config" --work-dir "$run_dir" \
+      --cfg-options "${cfg_options[@]}" \
+      2>&1 | tee "$run_dir/launcher.log"
+    train_status=${PIPESTATUS[0]}
+    set -e
+    ended_at="$(date --iso-8601=seconds)"
 
-  if test "$train_status" -ne 0; then
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-      "$experiment_id" "$config" "$run_dir" "$started_at" \
-      "$ended_at" "failed:$train_status" >> "$MANIFEST"
-    die "$experiment_id failed with exit code $train_status; serial batch stopped"
-  fi
+    if test "$train_status" -ne 0; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$run_id" "$experiment_id" "$seed" "$config" "$run_dir" \
+        "$run_commit" "$started_at" "$ended_at" \
+        "failed:$train_status" >> "$MANIFEST"
+      die "$run_id failed with exit code $train_status; serial batch stopped"
+    fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$experiment_id" "$config" "$run_dir" "$started_at" "$ended_at" \
-    "completed" >> "$MANIFEST"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tcompleted\n' \
+      "$run_id" "$experiment_id" "$seed" "$config" "$run_dir" \
+      "$run_commit" "$started_at" "$ended_at" >> "$MANIFEST"
+  done
 done
 
 printf '\nAll first-batch experiments completed successfully.\n'
