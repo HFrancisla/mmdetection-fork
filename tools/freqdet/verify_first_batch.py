@@ -95,6 +95,16 @@ def verify_configs() -> None:
                 f'{experiment_id}: unexpected output shape {output.shape}')
         if not torch.isfinite(output).all():
             raise AssertionError(f'{experiment_id}: output contains NaN/Inf')
+        if actual_params:
+            output.square().mean().backward()
+            for name, parameter in preprocessor.named_parameters():
+                if parameter.requires_grad:
+                    if parameter.grad is None:
+                        raise AssertionError(
+                            f'{experiment_id}: missing gradient for {name}')
+                    if not torch.isfinite(parameter.grad).all():
+                        raise AssertionError(
+                            f'{experiment_id}: non-finite gradient for {name}')
         print(f'{experiment_id}: OK, frontend_params={actual_params}')
 
 

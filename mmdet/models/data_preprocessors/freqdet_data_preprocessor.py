@@ -34,7 +34,7 @@ class _PhysicalDC6(nn.Module):
         shape = [1] * z.ndim
         shape[-3] = 3
         delta = differences * self.a.view(shape) + self.b.view(shape)
-        return (z + delta).exp().clamp_(0.0, 1.0) * 255.0
+        return (z + delta).exp().clamp(0.0, 1.0) * 255.0
 
 
 class _AttributionWrapper(nn.Module):
@@ -164,4 +164,3 @@ class FreqDetDataPreprocessor(DetDataPreprocessor):
             inputs = inputs.clamp(min=self.frontend_eps).log()
         processed['inputs'] = inputs
         return processed
-
