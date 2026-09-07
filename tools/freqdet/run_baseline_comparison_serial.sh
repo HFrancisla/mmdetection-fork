@@ -20,6 +20,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 cd "$REPO_ROOT"
+export PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$RUN_ROOT"
 
 if [[ ! -f "$SUMMARY_FILE" ]]; then
@@ -128,4 +129,3 @@ for seed in "${SEEDS[@]}"; do
 done
 
 echo "Serial baseline comparison finished. Summary: $SUMMARY_FILE"
-
