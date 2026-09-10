@@ -212,6 +212,190 @@ class LearnableDWT3FilterOnlyLL(nn.Module):
         return out
 
 
+class ChannelDiffDC(nn.Module):
+    """Three-channel DC branch used by the cascaded DWT-DC variants.
+
+    The operation intentionally matches ``LearnableDWT3FilterOnlyLL._wb``:
+
+        x -> x - spatial_mean(x) -> [R-G, G-B, R-B]
+          -> weight * difference + bias
+
+    ``weight`` and ``bias`` are per output difference channel.  A separate
+    instance is created for every DWT level; the branches must not share
+    parameters because they operate at different spatial scales.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.full((3,), 0.3))
+        self.bias = nn.Parameter(torch.zeros(3))
+
+    @staticmethod
+    def _channel_difference(subband):
+        r, g, bl = subband[:, 0:1], subband[:, 1:2], subband[:, 2:3]
+        return torch.cat([r - g, g - bl, r - bl], dim=1)
+
+    def forward(self, subband):
+        if subband.ndim != 4 or subband.shape[1] != 3:
+            raise ValueError(
+                'ChannelDiffDC expects a 4-D tensor with 3 channels, got '
+                f'{tuple(subband.shape)}')
+        centered = subband - subband.mean(dim=(2, 3), keepdim=True)
+        diff = self._channel_difference(centered)
+        return (diff * self.weight.view(1, 3, 1, 1) +
+                self.bias.view(1, 3, 1, 1))
+
+
+class LearnableDWTDCCascade(nn.Module):
+    """Cascaded multi-level DWT-DC with raw detail branches.
+
+    This is deliberately different from ``LearnableDWT3FilterOnlyLL``.  In
+    the latter, a deeper DWT is computed from the *raw* previous LL and the
+    DC/white-balance operation is applied only on the selected LL during
+    reconstruction.  Here the data path is instead::
+
+        LL1 --DC1--> 3-channel tensor --DWT--> LL2
+             --DC2--> 3-channel tensor --DWT--> LL3 --DC3--> ...
+
+    Only the requested number of levels is instantiated.  Each level has an
+    independent ``ChannelDiffDC`` branch.  The LH/HL/HH coefficients from
+    every decomposition are passed to the matching IDWT unchanged (``raw``).
+    Therefore the output of a two-level instance is reconstructed as::
+
+        IDWT1(IDWT2([DC2(LL2), raw_detail2]), raw_detail1)
+
+    and the three-level instance adds the analogous third-level stage.
+
+    Contract: ``(B, 3, H, W) -> (B, 3, H, W)``.  The input is interpreted in
+    the same log domain as the existing V9-Depth OnlyLL implementation.
+    There are 6 learnable parameters per enabled level.
+    """
+
+    _MAX_LEVELS = 3
+    # Keep the same 8-divisor padding as the existing (1/2/3, raw) protocol.
+    # This makes the new 2/3-level arms comparable to the already-run arms and
+    # guarantees that every possible subsequent DWT receives even dimensions.
+    _PAD_DIVISOR = 8
+
+    def __init__(self, levels=3, wave='haar'):
+        super().__init__()
+        if wave != 'haar':
+            raise ValueError(f'LearnableDWTDCCascade expects haar, got {wave}')
+        if not isinstance(levels, int) or isinstance(levels, bool):
+            raise TypeError(f'levels must be an integer in [1, 3], got {levels!r}')
+        if not 1 <= levels <= self._MAX_LEVELS:
+            raise ValueError(
+                f'levels must be in [1, {self._MAX_LEVELS}], got {levels}')
+
+        self.levels = levels
+        self.zero_detail = os.environ.get(
+            'FRBNET_V9_ONLYLL_ZERO_DETAIL', '0').strip() == '1'
+        self.dwt = DWT_2D()
+        self.idwt = IDWT_2D()
+
+        # Separate modules are important: DC1/DC2/DC3 correspond to
+        # different resolutions and must not share weight or bias.
+        self.dc1 = ChannelDiffDC()
+        if levels >= 2:
+            self.dc2 = ChannelDiffDC()
+        if levels >= 3:
+            self.dc3 = ChannelDiffDC()
+
+    @staticmethod
+    def _zero_details(details):
+        return tuple(torch.zeros_like(detail) for detail in details)
+
+    @staticmethod
+    def _parse_level(value):
+        """Parse ``1``, ``2``, ``3``, ``12`` or ``123`` to max depth."""
+        text = str(value).strip()
+        enabled = [int(ch) for ch in text if ch in '123']
+        if not enabled:
+            raise ValueError(
+                'DWT-DC cascade levels must contain at least one of 1/2/3, '
+                f'got {value!r}')
+        return max(enabled)
+
+    def _prepare_input(self, img):
+        if img.ndim != 4 or img.shape[1] != 3:
+            raise ValueError(
+                'LearnableDWTDCCascade expects (B, 3, H, W), got '
+                f'{tuple(img.shape)}')
+        _, _, h, w = img.shape
+        pad_h = (-h) % self._PAD_DIVISOR
+        pad_w = (-w) % self._PAD_DIVISOR
+        x = torch.log(img.clamp(min=1e-6))
+        if pad_h or pad_w:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+        return x, h, w, pad_h, pad_w
+
+    def forward(self, img):
+        x, h, w, pad_h, pad_w = self._prepare_input(img)
+
+        # Level 1: raw details are retained, but its LL is transformed before
+        # it is allowed to enter the next decomposition.
+        ll1, lh1, hl1, hh1 = self.dwt(x).chunk(4, dim=1)
+        ll1_dc = self.dc1(ll1)
+        details1 = (lh1, hl1, hh1)
+
+        if self.levels == 1:
+            if self.zero_detail:
+                details1 = self._zero_details(details1)
+            out = self.idwt(torch.cat([ll1_dc, *details1], dim=1))
+        else:
+            # Level 2 is decomposed from DC1's 3-channel output, not from the
+            # raw LL1.  Its details remain raw relative to this branch.
+            ll2, lh2, hl2, hh2 = self.dwt(ll1_dc).chunk(4, dim=1)
+            ll2_dc = self.dc2(ll2)
+            details2 = (lh2, hl2, hh2)
+
+            if self.levels == 2:
+                if self.zero_detail:
+                    details1 = self._zero_details(details1)
+                    details2 = self._zero_details(details2)
+                ll1_r = self.idwt(torch.cat([ll2_dc, *details2], dim=1))
+                out = self.idwt(torch.cat([ll1_r, *details1], dim=1))
+            else:
+                # Level 3 repeats the same rule: DWT3 sees DC2's 3-channel
+                # output.  This is a separate DC3 branch, not shared DC2.
+                ll3, lh3, hl3, hh3 = self.dwt(ll2_dc).chunk(4, dim=1)
+                ll3_dc = self.dc3(ll3)
+                details3 = (lh3, hl3, hh3)
+
+                if self.zero_detail:
+                    details1 = self._zero_details(details1)
+                    details2 = self._zero_details(details2)
+                    details3 = self._zero_details(details3)
+                ll2_r = self.idwt(torch.cat([ll3_dc, *details3], dim=1))
+                ll1_r = self.idwt(torch.cat([ll2_r, *details2], dim=1))
+                out = self.idwt(torch.cat([ll1_r, *details1], dim=1))
+
+        if pad_h or pad_w:
+            out = out[:, :, :h, :w]
+        return out
+
+
+class LearnableDWT1FilterDC(LearnableDWTDCCascade):
+    """Explicit one-level name for the cascaded DWT-DC family."""
+
+    def __init__(self, wave='haar'):
+        super().__init__(levels=1, wave=wave)
+
+
+class LearnableDWT2FilterDC(LearnableDWTDCCascade):
+    """Two-level DWT-DC: DC1 -> DWT2 -> DC2, all details raw."""
+
+    def __init__(self, wave='haar'):
+        super().__init__(levels=2, wave=wave)
+
+
+class LearnableDWT3FilterDC(LearnableDWTDCCascade):
+    """Three-level DWT-DC: DC1 -> DWT2 -> DC2 -> DWT3 -> DC3."""
+
+    def __init__(self, wave='haar'):
+        super().__init__(levels=3, wave=wave)
+
+
 class RadialBasisFilter(nn.Module):
     """FFT radial-basis filter (kept for F0 reference)."""
 
@@ -327,8 +511,15 @@ class LearnableDWTFilter(nn.Module):
 
 
 class FIINet(nn.Module):
-    """FIINet with V9-OnlyLL filter (FIM) — 本分支装配 LearnableDWT3FilterOnlyLL。
-    对比装配（历史）：V9 三通路 = LearnableDWT3Filter（36 参）；本分支 = OnlyLL（6~18 参）。"""
+    """FIINet with the V9-Depth DWT front-end.
+
+    The historical ``dwt_onlyll`` path remains the default.  Set
+    ``FRBNET_FIM=dwt_dc`` (or ``dwt_dc_cascade``) to use the new cascaded
+    DWT-DC path, and select its depth with ``FRBNET_DWT_DC_LEVELS=1``, ``2``
+    or ``3``.  If that variable is omitted, the highest level in the existing
+    ``FRBNET_V9_LL_LEVELS`` variable is used, so old experiment runners can
+    be reused safely.
+    """
 
     def __init__(self, number_K, lamda):
         super(FIINet, self).__init__()
@@ -342,7 +533,29 @@ class FIINet(nn.Module):
                                         nn.BatchNorm2d(32),
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
-        self.fim = LearnableDWT3FilterOnlyLL()
+        fim_name = os.environ.get('FRBNET_FIM', 'dwt_onlyll').strip().lower()
+        cascade_flag = os.environ.get(
+            'FRBNET_DWT_DC_CASCADE',
+            os.environ.get('FRBNET_V9_DWT_DC_CASCADE', '0'))
+        use_cascade = fim_name in {
+            'dwt_dc', 'dwt-dc', 'dwt_dc_cascade', 'dwt-cascade',
+            'dwt_cascade'
+        } or cascade_flag.strip() == '1'
+        if use_cascade:
+            level_value = os.environ.get('FRBNET_DWT_DC_LEVELS')
+            if level_value is None:
+                level_value = os.environ.get('FRBNET_V9_DWT_DC_LEVELS')
+            if level_value is None:
+                level_value = os.environ.get('FRBNET_V9_LL_LEVELS', '3')
+            levels = LearnableDWTDCCascade._parse_level(level_value)
+            cascade_cls = {
+                1: LearnableDWT1FilterDC,
+                2: LearnableDWT2FilterDC,
+                3: LearnableDWT3FilterDC,
+            }[levels]
+            self.fim = cascade_cls()
+        else:
+            self.fim = LearnableDWT3FilterOnlyLL()
 
     def forward(self, x):
         feat_f = self.fim(x)
