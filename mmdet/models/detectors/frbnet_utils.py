@@ -510,6 +510,145 @@ class LearnableDWTFilter(nn.Module):
         return out
 
 
+class LearnableDWTFDSP(nn.Module):
+    """Apply per-channel FDSP to selected LL bands and reconstruct the image.
+
+    Detector inputs are normalized RGB tensors. This module first restores RGB
+    pixel values using the data-preprocessor statistics, maps them to [0, 1],
+    and takes the logarithm. On each selected LL band it applies the 2-D FDSP
+    response independently to R, G, and B, optionally centers each channel
+    over space and optionally applies atan(4 * response). A learned per-level
+    affine transform follows FDSP. Haar detail bands are passed through raw.
+
+    The original FDSP definition is single-channel; processing each RGB
+    channel independently is the three-channel adaptation used by this model.
+    """
+
+    def __init__(self,
+                 levels=(1, 2, 3),
+                 mean_center=False,
+                 use_atan=False,
+                 alpha=1.6,
+                 input_mean=(123.675, 116.28, 103.53),
+                 input_std=(58.395, 57.12, 57.375)):
+        super().__init__()
+        self.levels = self._parse_levels(levels)
+        self.depth = self.levels[-1]
+        self.mean_center = bool(mean_center)
+        self.use_atan = bool(use_atan)
+        self.alpha = float(alpha)
+        if self.alpha <= 1.0:
+            raise ValueError(f'FDSP alpha must be greater than 1, got {alpha!r}')
+        self.input_mean = self._validate_rgb_values(input_mean, 'input_mean')
+        self.input_std = self._validate_rgb_values(input_std, 'input_std')
+        if any(value <= 0 for value in self.input_std):
+            raise ValueError('FDSP input_std values must all be positive')
+
+        self.dwt = DWT_2D()
+        self.idwt = IDWT_2D()
+        self.scale_by_level = nn.ParameterDict({
+            f'll{level}': nn.Parameter(torch.full((3,), 0.3))
+            for level in self.levels
+        })
+        self.bias_by_level = nn.ParameterDict({
+            f'll{level}': nn.Parameter(torch.zeros(3))
+            for level in self.levels
+        })
+
+    @staticmethod
+    def _validate_rgb_values(values, name):
+        values = tuple(float(value) for value in values)
+        if len(values) != 3:
+            raise ValueError(f'{name} must contain exactly three RGB values')
+        return values
+
+    @staticmethod
+    def _parse_levels(levels):
+        """Accept a depth (int) or the enabled LL prefix as a sequence."""
+        if isinstance(levels, bool):
+            raise ValueError('FDSP levels must be a depth or an LL prefix')
+        if isinstance(levels, int):
+            if levels not in (1, 2, 3):
+                raise ValueError(f'FDSP depth must be 1, 2, or 3, got {levels}')
+            parsed = tuple(range(1, levels + 1))
+        elif isinstance(levels, str):
+            value = levels.strip()
+            if not value or any(char not in '123' for char in value):
+                raise ValueError(f'Invalid FDSP LL prefix: {levels!r}')
+            parsed = tuple(int(char) for char in value)
+        else:
+            try:
+                parsed = tuple(int(level) for level in levels)
+            except (TypeError, ValueError):
+                raise ValueError(f'Invalid FDSP LL prefix: {levels!r}') from None
+        if parsed not in ((1,), (1, 2), (1, 2, 3)):
+            raise ValueError(
+                'FDSP levels must be one of (1,), (1, 2), or (1, 2, 3); '
+                f'got {parsed!r}')
+        return parsed
+
+    def _fdsp(self, subband):
+        # Replicate-pad right and bottom so all four shifted views retain H x W.
+        padded = F.pad(subband, (0, 1, 0, 1), mode='replicate')
+        i1 = padded[:, :, :-1, :-1]
+        i2 = padded[:, :, :-1, 1:]
+        i3 = padded[:, :, 1:, :-1]
+        i4 = padded[:, :, 1:, 1:]
+        d1 = i1 - i4
+        d2 = i2 - i3
+        response = (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
+        if self.use_atan:
+            response = torch.atan(4.0 * response)
+        return response
+
+    def _process_ll(self, subband, level):
+        if self.mean_center:
+            subband = subband - subband.mean(dim=(2, 3), keepdim=True)
+        response = self._fdsp(subband)
+        scale = self.scale_by_level[f'll{level}'].view(1, 3, 1, 1)
+        bias = self.bias_by_level[f'll{level}'].view(1, 3, 1, 1)
+        return response * scale + bias
+
+    def forward(self, img):
+        if img.ndim != 4 or img.shape[1] != 3:
+            raise ValueError(
+                'LearnableDWTFDSP expects an (N, 3, H, W) normalized RGB tensor, '
+                f'got {tuple(img.shape)}')
+        _, _, h, w = img.shape
+        mean = img.new_tensor(self.input_mean).view(1, 3, 1, 1)
+        std = img.new_tensor(self.input_std).view(1, 3, 1, 1)
+        x = ((img * std + mean).clamp(min=0.0, max=255.0) / 255.0)
+        x = torch.log(x.clamp(min=1e-6))
+
+        # Keep the same multiple-of-eight padding convention as the existing
+        # three-level DWT path, even for the shallower ablations.
+        pad_h = (-h) % 8
+        pad_w = (-w) % 8
+        if pad_h or pad_w:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+
+        ll_bands = {}
+        detail_bands = {}
+        current = x
+        for level in range(1, self.depth + 1):
+            ll, lh, hl, hh = self.dwt(current).chunk(4, dim=1)
+            ll_bands[level] = ll
+            detail_bands[level] = torch.cat((lh, hl, hh), dim=1)
+            current = ll
+
+        current = ll_bands[self.depth]
+        for level in range(self.depth, 0, -1):
+            current = self._process_ll(current, level)
+            if level > 1:
+                current = self.idwt(torch.cat(
+                    (current, detail_bands[level]), dim=1))
+
+        out = self.idwt(torch.cat((current, detail_bands[1]), dim=1))
+        if pad_h or pad_w:
+            out = out[:, :, :h, :w]
+        return out
+
+
 class FIINet(nn.Module):
     """FIINet with the V9-Depth DWT front-end.
 
@@ -521,7 +660,16 @@ class FIINet(nn.Module):
     be reused safely.
     """
 
-    def __init__(self, number_K, lamda):
+    def __init__(self,
+                 number_K,
+                 lamda,
+                 fim=None,
+                 fdsp_levels=(1, 2, 3),
+                 fdsp_mean_center=False,
+                 fdsp_use_atan=False,
+                 fdsp_alpha=1.6,
+                 fdsp_input_mean=(123.675, 116.28, 103.53),
+                 fdsp_input_std=(58.395, 57.12, 57.375)):
         super(FIINet, self).__init__()
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
                                            nn.BatchNorm2d(24),
@@ -533,7 +681,19 @@ class FIINet(nn.Module):
                                         nn.BatchNorm2d(32),
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
-        fim_name = os.environ.get('FRBNET_FIM', 'dwt_onlyll').strip().lower()
+        fim_name = (fim if fim is not None else
+                    os.environ.get('FRBNET_FIM', 'dwt_onlyll')).strip().lower()
+        if fim_name in {'dwt_fdsp', 'fdsp'}:
+            self.fim = LearnableDWTFDSP(
+                levels=fdsp_levels,
+                mean_center=fdsp_mean_center,
+                use_atan=fdsp_use_atan,
+                alpha=fdsp_alpha,
+                input_mean=fdsp_input_mean,
+                input_std=fdsp_input_std)
+            self._fdsp_mode = True
+        else:
+            self._fdsp_mode = False
         cascade_flag = os.environ.get(
             'FRBNET_DWT_DC_CASCADE',
             os.environ.get('FRBNET_V9_DWT_DC_CASCADE', '0'))
@@ -541,7 +701,9 @@ class FIINet(nn.Module):
             'dwt_dc', 'dwt-dc', 'dwt_dc_cascade', 'dwt-cascade',
             'dwt_cascade'
         } or cascade_flag.strip() == '1'
-        if use_cascade:
+        if self._fdsp_mode:
+            pass
+        elif use_cascade:
             level_value = os.environ.get('FRBNET_DWT_DC_LEVELS')
             if level_value is None:
                 level_value = os.environ.get('FRBNET_V9_DWT_DC_LEVELS')
