@@ -1,3 +1,4 @@
+import math
 import os
 import torch.nn.functional as F
 import torch.nn as nn
@@ -522,6 +523,7 @@ class LearnableDWTFDSP(nn.Module):
 
     The original FDSP definition is single-channel; processing each RGB
     channel independently is the three-channel adaptation used by this model.
+    Any finite alpha is accepted so experiments can also test alpha <= 1.
     """
 
     def __init__(self,
@@ -537,8 +539,8 @@ class LearnableDWTFDSP(nn.Module):
         self.mean_center = bool(mean_center)
         self.use_atan = bool(use_atan)
         self.alpha = float(alpha)
-        if self.alpha <= 1.0:
-            raise ValueError(f'FDSP alpha must be greater than 1, got {alpha!r}')
+        if not math.isfinite(self.alpha):
+            raise ValueError(f'FDSP alpha must be finite, got {alpha!r}')
         self.input_mean = self._validate_rgb_values(input_mean, 'input_mean')
         self.input_std = self._validate_rgb_values(input_std, 'input_std')
         if any(value <= 0 for value in self.input_std):
