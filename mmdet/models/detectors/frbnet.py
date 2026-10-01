@@ -1,4 +1,4 @@
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 from torch import Tensor
 from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList, SampleList
@@ -16,7 +16,10 @@ class FRBNetBaseDetector(BaseDetector):
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
                 number_K = 10,
-                lamda = 0.1
+                lamda = 0.1,
+                fim: Optional[str] = None,
+                dwt_dc_levels: Optional[int] = None,
+                dwt_dc_prelog: Optional[bool] = None
                 )-> None:
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
@@ -29,7 +32,12 @@ class FRBNetBaseDetector(BaseDetector):
         self.bbox_head = MODELS.build(bbox_head)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
-        self.frb_net = FIINet(number_K, lamda)
+        self.frb_net = FIINet(
+            number_K,
+            lamda,
+            fim=fim,
+            dwt_dc_levels=dwt_dc_levels,
+            dwt_dc_prelog=dwt_dc_prelog)
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, local_metadata: dict, strict: bool, missing_keys: Union[List[str], str], 
                               unexpected_keys: Union[List[str], str], error_msgs: Union[List[str], str]) -> None:
@@ -84,7 +92,10 @@ class FRBNet(FRBNetBaseDetector):
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
                 number_K = 10,
-                lamda = 0.1) -> None:
+                lamda = 0.1,
+                fim: Optional[str] = None,
+                dwt_dc_levels: Optional[int] = None,
+                dwt_dc_prelog: Optional[bool] = None) -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -94,5 +105,8 @@ class FRBNet(FRBNetBaseDetector):
             data_preprocessor=data_preprocessor,
             init_cfg=init_cfg,
             number_K=number_K,
-            lamda=lamda
+            lamda=lamda,
+            fim=fim,
+            dwt_dc_levels=dwt_dc_levels,
+            dwt_dc_prelog=dwt_dc_prelog
             )

@@ -112,15 +112,55 @@ def test_dwt_dc_cascade_zero_detail_arm():
     assert all(detail.abs().max().item() < 1e-5 for detail in details)
 
 
+def test_dwt_dc_no_log_accepts_signed_standardized_input():
+    torch.manual_seed(2)
+    model = LearnableDWT3FilterDC(prelog=False).eval()
+    image = torch.randn(2, 3, 32, 40)
+
+    prepared, h, w, pad_h, pad_w = model._prepare_input(image)
+    assert (h, w, pad_h, pad_w) == (32, 40, 0, 0)
+    torch.testing.assert_close(prepared, image)
+
+    output = model(image)
+    reference = _reference_forward(model, image)
+    assert output.shape == image.shape
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(output, reference, atol=1e-6, rtol=1e-6)
+    assert model.prelog is False
+
+
+def test_fiinet_explicitly_builds_three_level_no_log_cascade(monkeypatch):
+    for name in (
+            'FRBNET_FIM', 'FRBNET_DWT_DC_CASCADE',
+            'FRBNET_V9_DWT_DC_CASCADE', 'FRBNET_DWT_DC_LEVELS',
+            'FRBNET_V9_DWT_DC_LEVELS', 'FRBNET_V9_LL_LEVELS',
+            'FRBNET_DWT_DC_PRELOG'):
+        monkeypatch.delenv(name, raising=False)
+
+    net = FIINet(
+        10,
+        0.1,
+        fim='dwt_dc',
+        dwt_dc_levels=3,
+        dwt_dc_prelog=False)
+
+    assert isinstance(net.fim, LearnableDWT3FilterDC)
+    assert net.fim.levels == 3
+    assert net.fim.prelog is False
+    assert sum(param.numel() for param in net.fim.parameters()) == 18
+
+
 def test_fiinet_selects_cascade_without_changing_default(monkeypatch):
     monkeypatch.delenv('FRBNET_DWT_DC_CASCADE', raising=False)
     monkeypatch.setenv('FRBNET_FIM', 'dwt_dc')
     monkeypatch.setenv('FRBNET_DWT_DC_LEVELS', '2')
     cascade_net = FIINet(10, 0.1)
     assert isinstance(cascade_net.fim, LearnableDWT2FilterDC)
+    assert cascade_net.fim.prelog is True
 
     monkeypatch.delenv('FRBNET_FIM', raising=False)
     monkeypatch.delenv('FRBNET_DWT_DC_LEVELS', raising=False)
     monkeypatch.delenv('FRBNET_V9_LL_LEVELS', raising=False)
+    monkeypatch.delenv('FRBNET_DWT_DC_PRELOG', raising=False)
     default_net = FIINet(10, 0.1)
     assert isinstance(default_net.fim, LearnableDWT3FilterOnlyLL)

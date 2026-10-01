@@ -266,8 +266,11 @@ class LearnableDWTDCCascade(nn.Module):
 
     and the three-level instance adds the analogous third-level stage.
 
-    Contract: ``(B, 3, H, W) -> (B, 3, H, W)``.  The input is interpreted in
-    the same log domain as the existing V9-Depth OnlyLL implementation.
+    Contract: ``(B, 3, H, W) -> (B, 3, H, W)``.  By default the input is
+    interpreted in the same log domain as the existing V9-Depth OnlyLL
+    implementation.  Set ``prelog=False`` to operate directly on the incoming
+    tensor, which is the correct mode when the detector data preprocessor has
+    already standardized the image into a signed tensor.
     There are 6 learnable parameters per enabled level.
     """
 
@@ -277,7 +280,7 @@ class LearnableDWTDCCascade(nn.Module):
     # guarantees that every possible subsequent DWT receives even dimensions.
     _PAD_DIVISOR = 8
 
-    def __init__(self, levels=3, wave='haar'):
+    def __init__(self, levels=3, wave='haar', prelog=True):
         super().__init__()
         if wave != 'haar':
             raise ValueError(f'LearnableDWTDCCascade expects haar, got {wave}')
@@ -286,8 +289,11 @@ class LearnableDWTDCCascade(nn.Module):
         if not 1 <= levels <= self._MAX_LEVELS:
             raise ValueError(
                 f'levels must be in [1, {self._MAX_LEVELS}], got {levels}')
+        if not isinstance(prelog, bool):
+            raise TypeError(f'prelog must be a bool, got {prelog!r}')
 
         self.levels = levels
+        self.prelog = prelog
         self.zero_detail = os.environ.get(
             'FRBNET_V9_ONLYLL_ZERO_DETAIL', '0').strip() == '1'
         self.dwt = DWT_2D()
@@ -324,7 +330,9 @@ class LearnableDWTDCCascade(nn.Module):
         _, _, h, w = img.shape
         pad_h = (-h) % self._PAD_DIVISOR
         pad_w = (-w) % self._PAD_DIVISOR
-        x = torch.log(img.clamp(min=1e-6))
+        x = img
+        if self.prelog:
+            x = torch.log(x.clamp(min=1e-6))
         if pad_h or pad_w:
             x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
         return x, h, w, pad_h, pad_w
@@ -378,22 +386,22 @@ class LearnableDWTDCCascade(nn.Module):
 class LearnableDWT1FilterDC(LearnableDWTDCCascade):
     """Explicit one-level name for the cascaded DWT-DC family."""
 
-    def __init__(self, wave='haar'):
-        super().__init__(levels=1, wave=wave)
+    def __init__(self, wave='haar', prelog=True):
+        super().__init__(levels=1, wave=wave, prelog=prelog)
 
 
 class LearnableDWT2FilterDC(LearnableDWTDCCascade):
     """Two-level DWT-DC: DC1 -> DWT2 -> DC2, all details raw."""
 
-    def __init__(self, wave='haar'):
-        super().__init__(levels=2, wave=wave)
+    def __init__(self, wave='haar', prelog=True):
+        super().__init__(levels=2, wave=wave, prelog=prelog)
 
 
 class LearnableDWT3FilterDC(LearnableDWTDCCascade):
     """Three-level DWT-DC: DC1 -> DWT2 -> DC2 -> DWT3 -> DC3."""
 
-    def __init__(self, wave='haar'):
-        super().__init__(levels=3, wave=wave)
+    def __init__(self, wave='haar', prelog=True):
+        super().__init__(levels=3, wave=wave, prelog=prelog)
 
 
 class RadialBasisFilter(nn.Module):
@@ -513,15 +521,15 @@ class LearnableDWTFilter(nn.Module):
 class FIINet(nn.Module):
     """FIINet with the V9-Depth DWT front-end.
 
-    The historical ``dwt_onlyll`` path remains the default.  Set
-    ``FRBNET_FIM=dwt_dc`` (or ``dwt_dc_cascade``) to use the new cascaded
-    DWT-DC path, and select its depth with ``FRBNET_DWT_DC_LEVELS=1``, ``2``
-    or ``3``.  If that variable is omitted, the highest level in the existing
-    ``FRBNET_V9_LL_LEVELS`` variable is used, so old experiment runners can
-    be reused safely.
-    """
+    The historical ``dwt_onlyll`` path remains the default.  The cascade can
+    be selected either through ``FRBNET_FIM``/environment variables (legacy
+    runners) or explicitly with ``fim='dwt_dc'`` and
+    ``dwt_dc_levels=1/2/3``.  Set ``dwt_dc_prelog=False`` for the no-log
+    variant; this is appropriate for the detector path because
+    ``DetDataPreprocessor`` already outputs mean/std-standardized tensors.    """
 
-    def __init__(self, number_K, lamda):
+    def __init__(self, number_K, lamda, fim=None, dwt_dc_levels=None,
+                 dwt_dc_prelog=None):
         super(FIINet, self).__init__()
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
                                            nn.BatchNorm2d(24),
@@ -533,7 +541,8 @@ class FIINet(nn.Module):
                                         nn.BatchNorm2d(32),
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
-        fim_name = os.environ.get('FRBNET_FIM', 'dwt_onlyll').strip().lower()
+        fim_name = (fim if fim is not None else
+                    os.environ.get('FRBNET_FIM', 'dwt_onlyll')).strip().lower()
         cascade_flag = os.environ.get(
             'FRBNET_DWT_DC_CASCADE',
             os.environ.get('FRBNET_V9_DWT_DC_CASCADE', '0'))
@@ -542,18 +551,26 @@ class FIINet(nn.Module):
             'dwt_cascade'
         } or cascade_flag.strip() == '1'
         if use_cascade:
-            level_value = os.environ.get('FRBNET_DWT_DC_LEVELS')
-            if level_value is None:
-                level_value = os.environ.get('FRBNET_V9_DWT_DC_LEVELS')
-            if level_value is None:
-                level_value = os.environ.get('FRBNET_V9_LL_LEVELS', '3')
+            if dwt_dc_levels is not None:
+                level_value = dwt_dc_levels
+            else:
+                level_value = os.environ.get('FRBNET_DWT_DC_LEVELS')
+                if level_value is None:
+                    level_value = os.environ.get('FRBNET_V9_DWT_DC_LEVELS')
+                if level_value is None:
+                    level_value = os.environ.get('FRBNET_V9_LL_LEVELS', '3')
             levels = LearnableDWTDCCascade._parse_level(level_value)
+            if dwt_dc_prelog is None:
+                prelog = os.environ.get(
+                    'FRBNET_DWT_DC_PRELOG', '1').strip() != '0'
+            else:
+                prelog = dwt_dc_prelog
             cascade_cls = {
                 1: LearnableDWT1FilterDC,
                 2: LearnableDWT2FilterDC,
                 3: LearnableDWT3FilterDC,
             }[levels]
-            self.fim = cascade_cls()
+            self.fim = cascade_cls(prelog=prelog)
         else:
             self.fim = LearnableDWT3FilterOnlyLL()
 
