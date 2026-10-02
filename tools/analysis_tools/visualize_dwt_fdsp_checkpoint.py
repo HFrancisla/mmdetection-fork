@@ -49,6 +49,7 @@ CLASS_LABELS_ZH = {
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOG_FLOOR = math.log(1e-6)
+LOG_CEIL = math.log(2.0)
 
 
 def read_ground_truth(xml_path: Path):
@@ -196,7 +197,7 @@ def infer_and_capture(model, image_path: Path):
         captured['normalized_input'] = cpu_tensor(inputs[0])
 
     def dwt_pre_hook(module, inputs):
-        captured['log_input_padded'] = cpu_tensor(inputs[0])
+        captured['dwt_input_rgb01_padded'] = cpu_tensor(inputs[0])
 
     def dwt_hook(module, inputs, output):
         captured['dwt_output'] = cpu_tensor(output)
@@ -215,10 +216,12 @@ def infer_and_capture(model, image_path: Path):
 
     def recording_process(module, subband):
         result = original_process(subband)
-        centered = subband
+        log_subband = torch.log(subband.clamp(min=1e-6))
+        centered = log_subband
         if module.mean_center:
             centered = centered - centered.mean(dim=(2, 3), keepdim=True)
         captured['ll_pre'] = cpu_tensor(subband)
+        captured['log_ll'] = cpu_tensor(log_subband)
         captured['fdsp_raw'] = cpu_tensor(module._fdsp(centered))
         captured['ll_prime'] = cpu_tensor(result)
         return result
@@ -261,12 +264,13 @@ def infer_and_capture(model, image_path: Path):
         norm * std[:, None, None] + mean[:, None, None], 0, 255)
     resized_rgb = np.moveaxis(resized_rgb, 0, -1).astype(np.uint8)
 
-    log_full = captured['log_input_padded'][0, :, :img_h, :img_w]
+    dwt_input = captured['dwt_input_rgb01_padded'][0, :, :img_h, :img_w]
     bands = np.split(captured['dwt_output'][0], 4, axis=0)
     band_h, band_w = math.ceil(img_h / 2), math.ceil(img_w / 2)
     bands = [b[:, :band_h, :band_w] for b in bands]
     idwt = captured['idwt_output_padded'][0, :, :img_h, :img_w]
     ll_pre = captured['ll_pre'][0, :, :band_h, :band_w]
+    log_ll = captured['log_ll'][0, :, :band_h, :band_w]
     fdsp_raw = captured['fdsp_raw'][0, :, :band_h, :band_w]
     ll_prime = captured['ll_prime'][0, :, :band_h, :band_w]
 
@@ -278,15 +282,16 @@ def infer_and_capture(model, image_path: Path):
         'result': result,
         'meta': meta,
         'resized_rgb': resized_rgb,
-        'log_input': log_full,
+        'dwt_input_rgb01': dwt_input,
         'll': bands[0],
         'lh': bands[1],
         'hl': bands[2],
         'hh': bands[3],
         'll_pre': ll_pre,
+        'log_ll': log_ll,
         'fdsp_raw': fdsp_raw,
         'll_prime': ll_prime,
-        'idwt_log': idwt,
+        'idwt_output': idwt,
         # Exact tensors through the front end. The full (possibly padded)
         # tensors are retained here; the flow PNG crops them to img_shape.
         'frontend_spatial': captured['frontend_spatial'][0],
@@ -306,18 +311,13 @@ def signed_limit(arrays, percentile=99.0):
     return max(float(np.percentile(values, percentile)), 1e-6)
 
 
-def log_to_rgb(log_chw):
-    rgb = np.exp(np.clip(log_chw, LOG_FLOOR, 0.0))
-    return np.moveaxis(rgb, 0, -1).clip(0, 1)
-
-
 def log_display(log_chw):
-    mapped = (log_chw - LOG_FLOOR) / (0.0 - LOG_FLOOR)
+    mapped = (log_chw - LOG_FLOOR) / (LOG_CEIL - LOG_FLOOR)
     return np.moveaxis(mapped.clip(0, 1), 0, -1)
 
 
 def lowpass_rgb(ll_chw):
-    return log_to_rgb(ll_chw / 2.0)
+    return np.moveaxis((ll_chw / 2.0).clip(0, 1), 0, -1)
 
 
 def feature_scalar(chw):
@@ -348,9 +348,9 @@ def add_image(ax, image, title, cmap=None, vmin=None, vmax=None):
 def make_key_summary(samples, output_dir, llprime_limit, idwt_limit):
     fig, axes = plt.subplots(len(samples), 4, figsize=(16, 4 * len(samples)),
                              squeeze=False)
-    headers = ['原始输入（原分辨率）', 'LL（解码后的低频代理图）',
+    headers = ['原始输入（原分辨率）', 'LL/2（RGB低频代理图）',
                "FDSP(LL) = LL'（RGB有符号均值）",
-               "IDWT(LL', LH, HL, HH)（log域有符号均值）"]
+               "IDWT(LL', LH, HL, HH)（RGB有符号均值）"]
     for row, sample in enumerate(samples):
         cap = sample['capture']
         axes[row, 0].imshow(sample['original_rgb'])
@@ -362,7 +362,7 @@ def make_key_summary(samples, output_dir, llprime_limit, idwt_limit):
         axes[row, 1].imshow(lowpass_rgb(cap['ll']))
         add_signed(axes[row, 2], feature_scalar(cap['ll_prime']),
                    llprime_limit, '')
-        add_signed(axes[row, 3], feature_scalar(cap['idwt_log']),
+        add_signed(axes[row, 3], feature_scalar(cap['idwt_output']),
                    idwt_limit, '')
         for ax in axes[row]:
             ax.axis('off')
@@ -385,11 +385,11 @@ def make_sample_summary(sample, output_dir, llprime_limit, idwt_limit):
     axes[0].imshow(sample['original_rgb'])
     axes[0].set_title('原始输入（原分辨率）')
     axes[1].imshow(lowpass_rgb(cap['ll']))
-    axes[1].set_title('LL（解码后的低频代理图）')
+    axes[1].set_title('LL/2（RGB低频代理图）')
     add_signed(axes[2], feature_scalar(cap['ll_prime']), llprime_limit,
                "FDSP(LL) = LL'（RGB有符号均值）")
-    add_signed(axes[3], feature_scalar(cap['idwt_log']), idwt_limit,
-               'IDWT输出（log域有符号均值）')
+    add_signed(axes[3], feature_scalar(cap['idwt_output']), idwt_limit,
+               'IDWT输出（RGB有符号均值）')
     for ax in axes:
         ax.axis('off')
     fig.tight_layout()
@@ -479,19 +479,19 @@ def make_frontend_flow(sample, output_dir, scales):
     plt.close(fig)
 
 
-def make_log_dwt_panel(sample, output_dir, ll_limit, detail_limit):
-    """Make the Log -> DWT bands explicit, including raw and decoded LL."""
+def make_dwt_bands_panel(sample, output_dir, ll_limit, detail_limit):
+    """Show the RGB -> DWT bands and the lowpass signal used by log(LL)."""
     cap = sample['capture']
     fig, axes = plt.subplots(2, 3, figsize=(17, 10), squeeze=False)
-    fig.suptitle(f"{sample['name']} — Log(Input) 与一级 DWT 子带",
+    fig.suptitle(f"{sample['name']} — RGB 输入与一级 DWT 子带",
                  fontsize=16)
 
-    add_image(axes[0, 0], log_display(cap['log_input']),
-              '01 Log(Input)（固定范围显示）')
+    add_image(axes[0, 0], cap['resized_rgb'],
+              '01 输入图（RGB）')
     add_signed(axes[0, 1], feature_scalar(cap['ll']), ll_limit,
                '02 LL 原始系数（RGB 均值）')
     add_image(axes[0, 2], lowpass_rgb(cap['ll']),
-              '03 LL 解码代理图 exp(LL/2)')
+              '03 LL/2 RGB 低频图')
     for ax, band, title in zip(
             axes[1], ('lh', 'hl', 'hh'),
             ('04 LH 细节带（RGB 均值）',
@@ -505,13 +505,13 @@ def make_log_dwt_panel(sample, output_dir, ll_limit, detail_limit):
         ax.set_title(ax.get_title(), fontsize=12, linespacing=1.25, pad=10)
     fig.text(
         0.5, 0.02,
-        'DWT 作用于 Log(Input)。02 是原始 LL 系数的有符号通道均值；'
-        '03 是便于按亮度观察的 exp(LL/2) RGB 代理图。'
+        '先将归一化输入还原到 [0,1] RGB，再进行 DWT。02 是原始 LL 系数的有符号通道均值；'
+        '03 是便于按亮度观察的 LL/2 RGB 低频图。log(LL) 只进入 FDSP 支路。'
         'LH / HL / HH 与 LL 系数均显示有符号 RGB 通道均值。',
         ha='center', fontsize=10)
     fig.subplots_adjust(left=0.04, right=0.99, top=0.89, bottom=0.13,
                         wspace=0.08, hspace=0.32)
-    fig.savefig(output_dir / f"{Path(sample['name']).stem}_log_dwt_bands.png",
+    fig.savefig(output_dir / f"{Path(sample['name']).stem}_dwt_bands.png",
                 dpi=180, bbox_inches='tight')
     plt.close(fig)
 
@@ -524,13 +524,13 @@ def make_feature_panels(sample, output_dir, scales):
         'DWT-FDSP 中间特征诊断', fontsize=15)
 
     add_image(axes[0, 0], cap['resized_rgb'], '01 输入图（检测缩放，RGB）')
-    add_image(axes[0, 1], log_display(cap['log_input']),
-              '02 Log(Input)（固定范围显示）')
+    add_image(axes[0, 1], np.moveaxis(cap['dwt_input_rgb01'], 0, -1),
+              '02 DWT输入 RGB（[0,1]）')
     add_image(axes[0, 2], lowpass_rgb(cap['ll']),
-              '03 LL（解码后的低频代理图）')
-    add_signed(axes[0, 3], feature_scalar(cap['idwt_log']),
+              '03 LL/2（RGB低频代理图）')
+    add_signed(axes[0, 3], feature_scalar(cap['idwt_output']),
                scales['idwt'],
-               '04 IDWT输出（原始log域，RGB有符号均值）')
+               '04 IDWT输出（RGB有符号均值）')
 
     add_signed(axes[1, 0], feature_scalar(cap['lh']), scales['detail'],
                '05 LH细节带（RGB有符号均值）')
@@ -542,11 +542,10 @@ def make_feature_panels(sample, output_dir, scales):
                scales['ll_prime'], "08 IDWT前的LL'（无IDWT特征视图）")
 
     for col, channel in enumerate(('R', 'G', 'B')):
-        ll_chan = np.exp(np.clip(cap['ll_pre'][col] / 2.0,
-                                 LOG_FLOOR, 0.0))
+        ll_chan = cap['log_ll'][col]
         panel_number = {'R': 9, 'G': 10, 'B': 11}[channel]
-        add_image(axes[2, col], ll_chan,
-                  f'{panel_number:02d} FDSP输入 LL_{channel}（解码图）',
+        add_image(axes[2, col], log_display(ll_chan[None])[..., 0],
+                  f'{panel_number:02d} FDSP输入 log(LL_{channel})',
                   cmap='gray', vmin=0, vmax=1)
         add_signed(axes[3, col], cap['fdsp_raw'][col],
                    scales['fdsp_raw'],
@@ -560,7 +559,7 @@ def make_feature_panels(sample, output_dir, scales):
     add_signed(axes[3, 3], feature_scalar(cap['ll_prime']),
                scales['ll_prime'], "16 Cat(FDSP_R, G, B) = LL'（通道均值）")
 
-    grad_ll = gradient_magnitude(cap['ll_pre'])
+    grad_ll = gradient_magnitude(cap['log_ll'])
     grad_fdsp = gradient_magnitude(cap['ll_prime'])
     add_image(axes[4, 3], grad_fdsp,
               "20 LL'梯度幅值（共享色阶）",
@@ -572,7 +571,7 @@ def make_feature_panels(sample, output_dir, scales):
 
     edge = grad_fdsp >= np.percentile(grad_fdsp, 85)
     edge_fig, edge_axes = plt.subplots(1, 3, figsize=(14, 4))
-    add_image(edge_axes[0], grad_ll, 'LL梯度幅值',
+    add_image(edge_axes[0], grad_ll, 'log(LL)梯度幅值',
               cmap='magma', vmin=0, vmax=scales['gradient'])
     add_image(edge_axes[1], grad_fdsp, "LL'梯度幅值",
               cmap='magma', vmin=0, vmax=scales['gradient'])
@@ -586,10 +585,13 @@ def make_feature_panels(sample, output_dir, scales):
     plt.close(edge_fig)
 
     idwt_fig, idwt_axes = plt.subplots(1, 2, figsize=(10, 4))
-    add_signed(idwt_axes[0], feature_scalar(cap['idwt_log']),
-               scales['idwt'], 'IDWT原始输出（log域RGB有符号均值）')
-    add_image(idwt_axes[1], log_to_rgb(cap['idwt_log']),
-              'exp(IDWT)显示图（裁剪到可视范围）')
+    add_signed(idwt_axes[0], feature_scalar(cap['idwt_output']),
+               scales['idwt'], 'IDWT输出（RGB有符号均值）')
+    idwt_pseudo_rgb = np.moveaxis(np.clip(
+        (cap['idwt_output'] + scales['idwt']) / (2 * scales['idwt']),
+        0, 1), 0, -1)
+    add_image(idwt_axes[1], idwt_pseudo_rgb,
+              'IDWT输出伪 RGB（共享有符号色阶）')
     idwt_fig.tight_layout()
     idwt_fig.savefig(
         output_dir / f"{Path(sample['name']).stem}_idwt_views.png",
@@ -748,10 +750,11 @@ def main():
             sample_dir / f"{Path(sample['name']).stem}_features.npz",
             original_rgb=sample['original_rgb'],
             resized_rgb=cap['resized_rgb'],
-            log_input=cap['log_input'],
+            dwt_input_rgb01=cap['dwt_input_rgb01'],
             ll=cap['ll'], lh=cap['lh'], hl=cap['hl'], hh=cap['hh'],
+            log_ll=cap['log_ll'],
             ll_pre=cap['ll_pre'], fdsp_raw=cap['fdsp_raw'],
-            ll_prime=cap['ll_prime'], idwt_output_log=cap['idwt_log'],
+            ll_prime=cap['ll_prime'], idwt_output=cap['idwt_output'],
             frontend_spatial=cap['frontend_spatial'],
             frontend_dwtnet=cap['frontend_dwtnet'],
             frontend_spectral=cap['frontend_spectral'],
@@ -775,10 +778,10 @@ def main():
         sample['capture']['ll_prime'] for sample in samples
     ])
     idwt_limit = signed_limit([
-        feature_scalar(sample['capture']['idwt_log']) for sample in samples
+        feature_scalar(sample['capture']['idwt_output']) for sample in samples
     ])
     gradients = [
-        gradient_magnitude(sample['capture']['ll_pre'])
+        gradient_magnitude(sample['capture']['log_ll'])
         for sample in samples
     ] + [
         gradient_magnitude(sample['capture']['ll_prime'])
@@ -821,7 +824,7 @@ def main():
         make_sample_summary(sample, sample_dir, llprime_limit, idwt_limit)
         make_feature_panels(sample, sample_dir, scales)
         make_frontend_flow(sample, sample_dir, flow_scales)
-        make_log_dwt_panel(sample, sample_dir, ll_coeff_limit, detail_limit)
+        make_dwt_bands_panel(sample, sample_dir, ll_coeff_limit, detail_limit)
         detection_summary = make_detection_panel(
             sample, class_names, sample_dir)
         sample_manifest.append({
@@ -834,8 +837,8 @@ def main():
                                 f"{Path(sample['name']).stem}_features.npz"),
             'frontend_flow_png': str(sample_dir /
                                      f"{Path(sample['name']).stem}_frontend_flow.png"),
-            'log_dwt_bands_png': str(sample_dir /
-                                     f"{Path(sample['name']).stem}_log_dwt_bands.png"),
+            'dwt_bands_png': str(sample_dir /
+                                 f"{Path(sample['name']).stem}_dwt_bands.png"),
             'detection': detection_summary,
         })
 
@@ -856,18 +859,19 @@ def main():
         'input_transform': {
             'resize': 'configured by the test pipeline',
             'color': 'RGB', 'mean': fdsp_mean, 'std': fdsp_std,
+            'dwt_input': 'normalized input restored to RGB [0,1]',
+            'log': 'applied to first-level LL only, before FDSP',
         },
         'visualization_note': (
-            "The key IDWT panel shows the captured raw log-domain output as "
-            "a signed RGB-mean map. A companion panel also shows exp(IDWT) "
-            "clipped to [log(1e-6), 0] for display. Exact log-domain values "
-            "are preserved in the NPZ files. LL' is shown before IDWT as a "
+            "The IDWT panel shows the reconstructed tensor with log-FDSP "
+            "processed LL and original RGB-domain detail bands. Exact tensors are "
+            "preserved in the NPZ files. LL' is shown before IDWT as a "
             "feature view. The frontend flow PNG shows spatial/spectral "
             "activations, their concatenation, and the exact three-channel "
             "tensor passed to the backbone; feature maps and pseudo-RGB are "
             "visual summaries, with full tensors stored in the NPZ. The "
-            "log-DWT PNG shows Log(Input), raw LL coefficients, an exp(LL/2) "
-            "proxy view, and all three detail bands."),
+            "DWT PNG shows the RGB input, raw LL coefficients, an LL/2 "
+            "lowpass RGB view, and all three detail bands."),
         'shared_color_scales': scales,
         'frontend_flow_color_scales': flow_scales,
         'samples': sample_manifest,

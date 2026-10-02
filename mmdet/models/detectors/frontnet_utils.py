@@ -38,14 +38,14 @@ class IDWT_2D(nn.Module):
 
 
 class DWTNet(nn.Module):
-    """Apply per-channel FDSP to the first-level LL band and reconstruct.
+    """Apply log-domain, per-channel FDSP to the first-level LL band.
 
-    Detector inputs are normalized RGB tensors. This module first restores RGB
-    pixel values using the data-preprocessor statistics, maps them to [0, 1],
-    and takes the logarithm. On LL1 it applies the 2-D FDSP
-    response independently to R, G, and B, optionally centers each channel
-    over space and optionally applies atan(4 * response). A learned affine
-    transform follows FDSP. The first-level Haar detail bands pass through raw.
+    Detector inputs are normalized RGB tensors. This module restores RGB pixel
+    values using the data-preprocessor statistics, maps them to [0, 1], and
+    applies a one-level Haar DWT. It then takes the logarithm of LL only,
+    applies FDSP independently to R, G, and B, and learns a separate affine
+    scale and bias for each channel. The LH, HL, and HH bands pass through
+    unchanged before the inverse DWT.
 
     The original FDSP definition is single-channel; processing each RGB
     channel independently is the three-channel adaptation used by this model.
@@ -71,11 +71,8 @@ class DWTNet(nn.Module):
 
         self.dwt = DWT_2D()
         self.idwt = IDWT_2D()
-        # Keep the ll1 state-dict keys used by the existing one-level models.
-        self.scale_by_level = nn.ParameterDict(
-            {'ll1': nn.Parameter(torch.full((3,), 0.3))})
-        self.bias_by_level = nn.ParameterDict(
-            {'ll1': nn.Parameter(torch.zeros(3))})
+        self.scale_by_channel = nn.Parameter(torch.full((3,), 0.3))
+        self.bias_by_channel = nn.Parameter(torch.zeros(3))
 
     @staticmethod
     def _validate_rgb_values(values, name):
@@ -99,12 +96,20 @@ class DWTNet(nn.Module):
         return response
 
     def _process_ll(self, subband):
+        subband = torch.log(subband.clamp(min=1e-6))
         if self.mean_center:
             subband = subband - subband.mean(dim=(2, 3), keepdim=True)
-        response = self._fdsp(subband)
-        scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
-        bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
-        return response * scale + bias
+
+        # Keep the R/G/B paths explicitly independent, as in the LL-FDSP
+        # diagram: FDSP(R) * W1 + b1, FDSP(G) * W2 + b2, FDSP(B) * W3 + b3.
+        channel_outputs = []
+        for channel_index in range(3):
+            channel = subband[:, channel_index:channel_index + 1]
+            response = self._fdsp(channel)
+            scale = self.scale_by_channel[channel_index]
+            bias = self.bias_by_channel[channel_index]
+            channel_outputs.append(response * scale + bias)
+        return torch.cat(channel_outputs, dim=1)
 
     def forward(self, img):
         if img.ndim != 4 or img.shape[1] != 3:
@@ -115,7 +120,6 @@ class DWTNet(nn.Module):
         mean = img.new_tensor(self.input_mean).view(1, 3, 1, 1)
         std = img.new_tensor(self.input_std).view(1, 3, 1, 1)
         x = ((img * std + mean).clamp(min=0.0, max=255.0) / 255.0)
-        x = torch.log(x.clamp(min=1e-6))
 
         pad_h = (-h) % 2
         pad_w = (-w) % 2
