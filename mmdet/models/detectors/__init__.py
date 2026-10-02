@@ -58,8 +58,8 @@ from .yolact import YOLACT
 from .yolo import YOLOV3
 from .yolof import YOLOF
 from .yolox import YOLOX
-from .frbnet import FRBNet
-from .frbnet_rcnn import FRBNetRCNN
+from .frontnet import FrontNet
+from .frontnet_rcnn import FrontNetRCNN
 
 __all__ = [
     'ATSS', 'BaseDetector', 'SingleStageDetector', 'TwoStageDetector', 'RPN',
@@ -73,5 +73,5 @@ __all__ = [
     'MaskFormer', 'DDOD', 'Mask2Former', 'SemiBaseDetector', 'SoftTeacher',
     'RTMDet', 'Detectron2Wrapper', 'CrowdDet', 'CondInst', 'BoxInst',
     'DetectionTransformer', 'ConditionalDETR', 'DINO', 'DABDETR', 'GLIP',
-    'DDQDETR', 'GroundingDINO', 'FRBNet', 'FRBNetRCNN'
+    'DDQDETR', 'GroundingDINO', 'FrontNet', 'FrontNetRCNN'
 ]

@@ -1,7 +1,7 @@
 _base_ = [
     './_base_/schedules/schedule_1x.py', './_base_/default_runtime.py'
 ]
-load_from ='./tood_r50_fpn_1x_coco_20211210_103425-20e20746.pth'
+load_from = '/home/ipr4090/2024_hzf/mmdetection/checkpoints/tood_r50_fpn_1x_coco_20211210_103425-20e20746.pth'
 data_preprocessor = dict(
     type='DetDataPreprocessor',
     mean=[123.675, 116.28, 103.53],
@@ -11,7 +11,7 @@ data_preprocessor = dict(
 
 # model settings
 model = dict(
-    type='FRBNet',
+    type='FrontNet',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
@@ -98,7 +98,7 @@ train_pipeline = [
         type='MinIoURandomCrop',
         min_ious=(0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_crop_size=0.3),
-    dict(type='RandomResize', scale=[(750, 500), (1500, 1000)], keep_ratio=True),
+    dict(type='RandomResize', scale=[(1500, 1000), (1500, 1000)], keep_ratio=True),
     dict(type='RandomFlip', prob=0.5),
    # dict(type='PhotoMetricDistortion'),
     dict(type='PackDetInputs')
@@ -113,8 +113,9 @@ test_pipeline = [
                    'scale_factor'))
 ]
 
+# train batch 4->2: 4090 24GB 显存适配（FrontNet FFT 模块 + TOOD 1500x1000 尺度超限）
 train_dataloader = dict(
-    batch_size=4,
+    batch_size=2,
     num_workers=1,
     persistent_workers=True,
    

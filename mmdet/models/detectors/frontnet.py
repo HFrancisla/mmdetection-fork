@@ -4,9 +4,9 @@ from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
 from .base import BaseDetector
-from .frbnet_utils import FIINet
+from .frontnet_utils import FIINet
 
-class FRBNetBaseDetector(BaseDetector):
+class FrontNetBaseDetector(BaseDetector):
     def __init__(self,
                 backbone: ConfigType,
                 neck: OptConfigType = None,
@@ -36,7 +36,7 @@ class FRBNetBaseDetector(BaseDetector):
         self.bbox_head = MODELS.build(bbox_head)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
-        self.frb_net = FIINet(
+        self.front_net = FIINet(
             number_K,
             lamda,
             fim=fim,
@@ -49,6 +49,15 @@ class FRBNetBaseDetector(BaseDetector):
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, local_metadata: dict, strict: bool, missing_keys: Union[List[str], str], 
                               unexpected_keys: Union[List[str], str], error_msgs: Union[List[str], str]) -> None:
+        # Keep loading checkpoints created before the FRBNet -> FrontNet rename.
+        legacy_frontend_prefix = (prefix + '.' if prefix else '') + 'frb_net.'
+        frontend_prefix = (prefix + '.' if prefix else '') + 'front_net.'
+        for key in list(state_dict.keys()):
+            if key.startswith(legacy_frontend_prefix):
+                migrated_key = frontend_prefix + key[len(legacy_frontend_prefix):]
+                state_dict.setdefault(migrated_key, state_dict[key])
+                del state_dict[key]
+
         bbox_head_prefix = prefix + '.bbox_head' if prefix else 'bbox_head'
         bbox_head_keys = [
             k for k in state_dict.keys() if k.startswith(bbox_head_prefix)
@@ -84,13 +93,13 @@ class FRBNetBaseDetector(BaseDetector):
 
     
     def extract_feat(self, batch_inputs: Tensor) -> Tuple[Tensor]:
-        out = self.frb_net(batch_inputs)
+        out = self.front_net(batch_inputs)
         out = self.backbone(out)
         fpn_out = self.neck(out)
         return fpn_out
     
 @MODELS.register_module()
-class FRBNet(FRBNetBaseDetector):
+class FrontNet(FrontNetBaseDetector):
     def __init__(self,
                 backbone: ConfigType,
                 neck: ConfigType,

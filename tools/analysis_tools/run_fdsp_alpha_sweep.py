@@ -55,7 +55,7 @@ def main():
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
-    config = repo_root / 'configs/frbnet/B_V2_LL1_FDSP_noatan.py'
+    config = repo_root / 'configs/frontnet/B_V2_LL1_FDSP_noatan.py'
     train_script = repo_root / 'tools/train.py'
     work_dir_root = (repo_root / args.work_dir_root).resolve()
     summary_path = work_dir_root / 'summary.csv'

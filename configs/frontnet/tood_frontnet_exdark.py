@@ -1,9 +1,3 @@
-# DarkFace 3:1:1 划分重跑（train 3600 / val 1200 / test 1200，val≠test；论文同口径）
-# 见 reports/DarkFace_3-1-1重跑计划.md
-
-# 梯度累积版（等效 batch=4）：4090 24GB 下 batch=4 实测峰值 24077MiB（仅 2% 余量），改用 batch=2 × accumulative_counts=2
-# 与 D3（batch=4）公平对比；仅 BN 统计按 micro-batch=2。见 reports/梯度累积等效batch计划.md
-
 _base_ = [
     './_base_/schedules/schedule_1x.py', './_base_/default_runtime.py'
 ]
@@ -17,14 +11,13 @@ data_preprocessor = dict(
 
 # model settings
 model = dict(
-    type='FRBNet',
+    type='FrontNet',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
         depth=50,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
-        frozen_stages=1,
         norm_cfg=dict(type='BN', requires_grad=True),
         norm_eval=True,
         style='pytorch',
@@ -38,7 +31,7 @@ model = dict(
         num_outs=5),
     bbox_head=dict(
         type='TOODHead',
-        num_classes=1,
+        num_classes=12,
         in_channels=256,
         stacked_convs=6,
         feat_channels=256,
@@ -70,7 +63,7 @@ model = dict(
     train_cfg=dict(
         initial_epoch=4,
         initial_assigner=dict(type='ATSSAssigner', topk=9),
-        assigner=dict(type='TaskAlignedAssigner', topk=5),
+        assigner=dict(type='TaskAlignedAssigner', topk=13),
         alpha=1,
         beta=6,
         allowed_border=-1,
@@ -80,38 +73,39 @@ model = dict(
         nms_pre=1000,
         min_bbox_size=0,
         score_thr=0.05,
-        nms=dict(type='nms', iou_threshold=0.5),
-        max_per_img=100))
+        nms=dict(type='nms', iou_threshold=0.6),
+        max_per_img=100),
+    number_K=10,
+    lamda=0.1)
 # dataset settings
-dataset_type = 'DarkFaceDataset'
-data_root = '/home/ipr4090/2024_hzf/Datasets/Darkface_FRBNet_3-1-1/'
+dataset_type = 'ExDarkVocDataset'
+data_root = '/home/ipr4090/2024_hzf/Datasets/Exdark_VOC'
 randomness = dict(
-    seed = 2,
+    seed = 6,
     diff_rank_seed=True,
-   # deterministic=True
 )
+
 backend_args = None
 
 train_pipeline = [
     dict(type='LoadImageFromFile', backend_args=backend_args),
     dict(type='LoadAnnotations', with_bbox=True),
-    # dict(
-    #     type='Expand',
-    #     mean=data_preprocessor['mean'],
-    #     to_rgb=data_preprocessor['bgr_to_rgb'],
-    #     ratio_range=(1, 2)),
+    dict(
+        type='Expand',
+        ratio_range=(1, 2)),
     dict(
         type='MinIoURandomCrop',
         min_ious=(0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_crop_size=0.3),
-    dict(type='RandomResize', scale=[(750, 500), (1500, 1000)], keep_ratio=True),
+    dict(type='RandomResize', scale=[(320, 320), (608, 608)], keep_ratio=True),
+
     dict(type='RandomFlip', prob=0.5),
-   # dict(type='PhotoMetricDistortion'),
+    # dict(type='PhotoMetricDistortion'), 
     dict(type='PackDetInputs')
 ]
 test_pipeline = [
     dict(type='LoadImageFromFile', backend_args=backend_args),
-    dict(type='Resize', scale=(1500, 1000), keep_ratio=True),
+    dict(type='Resize', scale=(608, 608), keep_ratio=True),
     dict(type='LoadAnnotations', with_bbox=True),
     dict(
         type='PackDetInputs',
@@ -120,26 +114,22 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=2,   # gradacc: batch2 × accum2 = 等效 batch4
-    num_workers=1,
+    batch_size=8,
+    num_workers=4,
     persistent_workers=True,
-   
     sampler=dict(type='DefaultSampler', shuffle=True),
     batch_sampler=dict(type='AspectRatioBatchSampler'),
     dataset=dict(
-        type='RepeatDataset',
-        times=3,
-        dataset = dict(
         type=dataset_type,
         data_root=data_root,
         ann_file='train.txt',
         data_prefix=dict(sub_data_root=''),
         filter_cfg=dict(filter_empty_gt=True, min_size=4),
         pipeline=train_pipeline,
-        backend_args=backend_args)))
+        backend_args=backend_args))
 val_dataloader = dict(
-    batch_size=2,
-    num_workers=1,
+    batch_size=8,
+    num_workers=4,
     persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=False),
@@ -152,15 +142,15 @@ val_dataloader = dict(
         pipeline=test_pipeline,
         backend_args=backend_args))
 test_dataloader = dict(
-    batch_size=2,
-    num_workers=1,
+    batch_size=8,
+    num_workers=4,
     persistent_workers=True,
     drop_last=False,
     sampler=dict(type='DefaultSampler', shuffle=False),
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file='test.txt',  # 3:1:1 真测试集（val≠test）
+        ann_file='test.txt',
         data_prefix=dict(sub_data_root=''),
         test_mode=True,
         pipeline=test_pipeline,
@@ -169,37 +159,28 @@ test_dataloader = dict(
 val_evaluator = [
     dict(
         type='VOCMetric',
-        metric='mAP',
-        eval_mode='area'),
-    dict(
-        type='VOCMetric',
-        metric='recall',
+        metric='mAP', 
         eval_mode='area')
 ]
 test_evaluator = val_evaluator
 
-train_cfg = dict(max_epochs=12, val_interval=4)
-
-param_scheduler = [
-    dict(
-        type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=1000),  # warmup ×2（累积）
-    dict(
-        type='MultiStepLR',
-        begin=0,
-        end=12,
-        by_epoch=True,
-        milestones=[8, 11],
-        gamma=0.1)
-]
+train_cfg = dict(max_epochs=24, val_interval=6)
 
 # optimizer
 optim_wrapper = dict(
     type='OptimWrapper',
     optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005),
-    accumulative_counts=2)  # 梯度累积：等效 batch = 2×2 = 4
-# optim_wrapper = dict(
-#     type='OptimWrapper',
-#     optimizer=dict(type='AdamW', lr=5e-5, weight_decay=0.0001)
-# )
-auto_scale_lr = dict(enable=False, base_batch_size=2)
+    clip_grad=dict(max_norm=35, norm_type=2)
+)
+
+# learning policy
+param_scheduler = [
+    dict(type='LinearLR', start_factor=0.1, by_epoch=False, begin=0, end=1000),
+    dict(type='MultiStepLR', by_epoch=True, milestones=[16, 22], gamma=0.1)
+]
+
+default_hooks = dict(
+    checkpoint=dict(type='CheckpointHook', interval=5, max_keep_ckpts=2))
+
+auto_scale_lr = dict(base_batch_size=16)
 

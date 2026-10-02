@@ -1,3 +1,9 @@
+# 修复版：训练尺度上限 1500×1000 → 1280×853（gradacc batch=2×2 实测 OOM，降尺度后峰值约 16-17GB）
+# 测试尺度不变（1500×1000）；fp32 不变；等效 batch=4 不变
+
+# 梯度累积版（等效 batch=4）：4090 24GB 下 batch=4 实测峰值 24077MiB（仅 2% 余量），改用 batch=2 × accumulative_counts=2
+# 与 D3（batch=4）公平对比；仅 BN 统计按 micro-batch=2。见 reports/梯度累积等效batch计划.md
+
 _base_ = [
     './_base_/schedules/schedule_1x.py', './_base_/default_runtime.py'
 ]
@@ -11,11 +17,10 @@ data_preprocessor = dict(
 
 # model settings
 model = dict(
-    type='FRBNet',
+    type='FrontNet',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
-        with_cp=True,
         depth=50,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
@@ -99,7 +104,7 @@ train_pipeline = [
         type='MinIoURandomCrop',
         min_ious=(0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_crop_size=0.3),
-    dict(type='RandomResize', scale=[(1500, 1000), (1500, 1000)], keep_ratio=True),
+    dict(type='RandomResize', scale=[(750, 500), (1280, 853)], keep_ratio=True),  # 训练尺度上限 1500→1280（OOM 修复，见 gradacc 计划）
     dict(type='RandomFlip', prob=0.5),
    # dict(type='PhotoMetricDistortion'),
     dict(type='PackDetInputs')
@@ -115,7 +120,7 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=4,
+    batch_size=2,   # gradacc: batch2 × accum2 = 等效 batch4
     num_workers=1,
     persistent_workers=True,
    
@@ -177,7 +182,7 @@ train_cfg = dict(max_epochs=12, val_interval=4)
 
 param_scheduler = [
     dict(
-        type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=500),
+        type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=1000),  # warmup ×2（累积）
     dict(
         type='MultiStepLR',
         begin=0,
@@ -190,7 +195,8 @@ param_scheduler = [
 # optimizer
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005))
+    optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005),
+    accumulative_counts=2)  # 梯度累积：等效 batch = 2×2 = 4
 # optim_wrapper = dict(
 #     type='OptimWrapper',
 #     optimizer=dict(type='AdamW', lr=5e-5, weight_decay=0.0001)

@@ -1,5 +1,5 @@
-# 修复版：with_cp=True 梯度检查点（backbone ResNet 激活重算）
-# fp32 / 原版尺度 (1500,1000) / 等效 batch=4 全部保留
+# DarkFace 3:1:1 划分重跑（train 3600 / val 1200 / test 1200，val≠test；论文同口径）
+# 见 reports/DarkFace_3-1-1重跑计划.md
 
 # 梯度累积版（等效 batch=4）：4090 24GB 下 batch=4 实测峰值 24077MiB（仅 2% 余量），改用 batch=2 × accumulative_counts=2
 # 与 D3（batch=4）公平对比；仅 BN 统计按 micro-batch=2。见 reports/梯度累积等效batch计划.md
@@ -17,11 +17,10 @@ data_preprocessor = dict(
 
 # model settings
 model = dict(
-    type='FRBNet',
+    type='FrontNet',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
-        with_cp=True,  # 梯度检查点：降激活显存（OOM 修复，零配置偏差）
         depth=50,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
@@ -85,7 +84,7 @@ model = dict(
         max_per_img=100))
 # dataset settings
 dataset_type = 'DarkFaceDataset'
-data_root = '/home/ipr4090/2024_hzf/Datasets/DarkFace_FRBNet/'
+data_root = '/home/ipr4090/2024_hzf/Datasets/Darkface_FRBNet_3-1-1/'
 randomness = dict(
     seed = 2,
     diff_rank_seed=True,
@@ -161,7 +160,7 @@ test_dataloader = dict(
     dataset=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file='val.txt',
+        ann_file='test.txt',  # 3:1:1 真测试集（val≠test）
         data_prefix=dict(sub_data_root=''),
         test_mode=True,
         pipeline=test_pipeline,

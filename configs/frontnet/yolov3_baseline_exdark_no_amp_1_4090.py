@@ -1,6 +1,6 @@
 # yolov3_baseline_exdark_no_amp.py
 # 用途：在本机复现 autodl 那次 YOLOv3 baseline (ExDark) 的指标。
-# 与 configs/frbnet/yolov3_baseline_exdark.py 的差异（4 处，全部对齐 autodl diag 输出）：
+# 与 configs/frontnet/yolov3_baseline_exdark.py 的差异（4 处，全部对齐 autodl diag 输出）：
 #   1) optim_wrapper.type: AmpOptimWrapper -> OptimWrapper     （关键：去掉 FP16）
 #   2) seed: 2025 -> 2023                                     （autodl 用的种子）
 #   3) param_scheduler MultiStepLR milestones: [8, 15] -> [18, 23]  （autodl 的 LR 调度）
@@ -17,7 +17,7 @@ data_preprocessor = dict(
     bgr_to_rgb=True,
     pad_size_divisor=32)
 
-# model settings (baseline: pure YOLOv3, NO FRBNet)
+# model settings (baseline: pure YOLOv3, NO FrontNet)
 model = dict(
     type='YOLOV3',
     data_preprocessor=data_preprocessor,
@@ -70,7 +70,7 @@ model = dict(
 dataset_type = 'ExDarkVocDataset'
 data_root = '/home/ipr4090/2024_hzf/Datasets/Exdark_VOC'
 randomness = dict(
-    seed=2023,           # 改 #2：autodl seed
+    seed=2025,           # 改 #2：autodl seed
     diff_rank_seed=True,
 )
 
@@ -147,7 +147,7 @@ val_evaluator = dict(
     eval_mode='area')
 test_evaluator = val_evaluator
 
-train_cfg = dict(max_epochs=24, val_interval=1)   # 改 #4：每 epoch 验证
+train_cfg = dict(max_epochs=24, val_interval=5)   # 改 #4：每 epoch 验证
 
 # 改 #1：去掉 AMP，纯 FP32 训练
 optim_wrapper = dict(
@@ -158,7 +158,7 @@ optim_wrapper = dict(
 # 改 #3：LR 在 epoch 18、23 下降
 param_scheduler = [
     dict(type='LinearLR', start_factor=0.1, by_epoch=False, begin=0, end=1000),
-    dict(type='MultiStepLR', by_epoch=True, milestones=[18, 23], gamma=0.1)
+    dict(type='MultiStepLR', by_epoch=True, milestones=[8, 15], gamma=0.1)
 ]
 
 default_hooks = dict(checkpoint=dict(type='CheckpointHook', interval=5, max_keep_ckpts=2))

@@ -9,9 +9,9 @@ data_preprocessor = dict(
     bgr_to_rgb=True,
     pad_size_divisor=32)
 
-# model settings
+# model settings (baseline: pure TOOD, NO FrontNet)
 model = dict(
-    type='FRBNet',
+    type='TOOD',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
@@ -49,14 +49,14 @@ model = dict(
         initial_loss_cls=dict(
             type='FocalLoss',
             use_sigmoid=True,
-            activated=True,  # use probability instead of logit as input
+            activated=True,
             gamma=2.0,
             alpha=0.25,
             loss_weight=1.0),
         loss_cls=dict(
             type='QualityFocalLoss',
             use_sigmoid=True,
-            activated=True,  # use probability instead of logit as input
+            activated=True,
             beta=2.0,
             loss_weight=1.0),
         loss_bbox=dict(type='GIoULoss', loss_weight=2.0)),
@@ -74,9 +74,8 @@ model = dict(
         min_bbox_size=0,
         score_thr=0.05,
         nms=dict(type='nms', iou_threshold=0.6),
-        max_per_img=100),
-    number_K=10,
-    lamda=0.1)
+        max_per_img=100))
+
 # dataset settings
 dataset_type = 'ExDarkVocDataset'
 data_root = '/home/ipr4090/2024_hzf/Datasets/Exdark_VOC'
@@ -98,9 +97,7 @@ train_pipeline = [
         min_ious=(0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_crop_size=0.3),
     dict(type='RandomResize', scale=[(320, 320), (608, 608)], keep_ratio=True),
-
     dict(type='RandomFlip', prob=0.5),
-    # dict(type='PhotoMetricDistortion'), 
     dict(type='PackDetInputs')
 ]
 test_pipeline = [
@@ -159,7 +156,7 @@ test_dataloader = dict(
 val_evaluator = [
     dict(
         type='VOCMetric',
-        metric='mAP', 
+        metric='mAP',
         eval_mode='area')
 ]
 test_evaluator = val_evaluator
@@ -183,4 +180,3 @@ default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', interval=5, max_keep_ckpts=2))
 
 auto_scale_lr = dict(base_batch_size=16)
-

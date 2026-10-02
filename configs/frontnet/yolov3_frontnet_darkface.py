@@ -10,7 +10,7 @@ data_preprocessor = dict(
     pad_size_divisor=32)
 
 model = dict(
-    type='FRBNet',
+    type='FrontNet',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='Darknet',

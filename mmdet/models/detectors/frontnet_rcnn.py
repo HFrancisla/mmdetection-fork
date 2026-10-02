@@ -6,9 +6,9 @@ from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
 from .mask_rcnn import MaskRCNN
 import torch
-from .frbnet_utils import FIINet
+from .frontnet_utils import FIINet
 
-class FRBNetBaseDetector(MaskRCNN):
+class FrontNetBaseDetector(MaskRCNN):
     def __init__(self,
                 backbone: ConfigType,
                 neck: OptConfigType = None,
@@ -30,7 +30,24 @@ class FRBNetBaseDetector(MaskRCNN):
             test_cfg=test_cfg,
             data_preprocessor=data_preprocessor, 
             init_cfg=init_cfg)
-        self.frb_net = FIINet(number_K, lamda)
+        self.front_net = FIINet(number_K, lamda)
+
+    def _load_from_state_dict(self, state_dict: dict, prefix: str,
+                              local_metadata: dict, strict: bool,
+                              missing_keys: Union[List[str], str],
+                              unexpected_keys: Union[List[str], str],
+                              error_msgs: Union[List[str], str]) -> None:
+        # Keep loading checkpoints created before the FRBNet -> FrontNet rename.
+        legacy_frontend_prefix = (prefix + '.' if prefix else '') + 'frb_net.'
+        frontend_prefix = (prefix + '.' if prefix else '') + 'front_net.'
+        for key in list(state_dict.keys()):
+            if key.startswith(legacy_frontend_prefix):
+                migrated_key = frontend_prefix + key[len(legacy_frontend_prefix):]
+                state_dict.setdefault(migrated_key, state_dict[key])
+                del state_dict[key]
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys,
+            unexpected_keys, error_msgs)
 
     def loss(self, batch_inputs: Tensor, batch_data_samples: SampleList) -> Union[dict, list]:
         x = self.extract_feat(batch_inputs)
@@ -66,7 +83,7 @@ class FRBNetBaseDetector(MaskRCNN):
         return losses
 
     def extract_feat(self, batch_inputs: Tensor) -> Tuple[Tensor]:
-        out = self.frb_net(batch_inputs)
+        out = self.front_net(batch_inputs)
         
         out = self.backbone(out)
  
@@ -75,7 +92,7 @@ class FRBNetBaseDetector(MaskRCNN):
         return fpn_out
     
 @MODELS.register_module()
-class FRBNetRCNN(FRBNetBaseDetector):
+class FrontNetRCNN(FrontNetBaseDetector):
     def __init__(self,
                 backbone: ConfigType,
                 neck: ConfigType,

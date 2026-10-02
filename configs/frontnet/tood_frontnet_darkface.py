@@ -1,10 +1,7 @@
-# 梯度累积版（等效 batch=4）：4090 24GB 下 batch=4 实测峰值 24077MiB（仅 2% 余量），改用 batch=2 × accumulative_counts=2
-# 与 D3（batch=4）公平对比；仅 BN 统计按 micro-batch=2。见 reports/梯度累积等效batch计划.md
-
 _base_ = [
     './_base_/schedules/schedule_1x.py', './_base_/default_runtime.py'
 ]
-load_from = '/home/ipr4090/2024_hzf/mmdetection/checkpoints/tood_r50_fpn_1x_coco_20211210_103425-20e20746.pth'
+load_from ='./tood_r50_fpn_1x_coco_20211210_103425-20e20746.pth'
 data_preprocessor = dict(
     type='DetDataPreprocessor',
     mean=[123.675, 116.28, 103.53],
@@ -14,7 +11,7 @@ data_preprocessor = dict(
 
 # model settings
 model = dict(
-    type='FRBNet',
+    type='FrontNet',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
@@ -117,7 +114,7 @@ test_pipeline = [
 ]
 
 train_dataloader = dict(
-    batch_size=2,   # gradacc: batch2 × accum2 = 等效 batch4
+    batch_size=4,
     num_workers=1,
     persistent_workers=True,
    
@@ -179,7 +176,7 @@ train_cfg = dict(max_epochs=12, val_interval=4)
 
 param_scheduler = [
     dict(
-        type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=1000),  # warmup ×2（累积）
+        type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=500),
     dict(
         type='MultiStepLR',
         begin=0,
@@ -192,8 +189,7 @@ param_scheduler = [
 # optimizer
 optim_wrapper = dict(
     type='OptimWrapper',
-    optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005),
-    accumulative_counts=2)  # 梯度累积：等效 batch = 2×2 = 4
+    optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005))
 # optim_wrapper = dict(
 #     type='OptimWrapper',
 #     optimizer=dict(type='AdamW', lr=5e-5, weight_decay=0.0001)

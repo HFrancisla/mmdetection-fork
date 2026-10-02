@@ -1,3 +1,6 @@
+# 修复版：with_cp=True 梯度检查点（backbone ResNet 激活重算）
+# fp32 / 原版尺度 (1500,1000) / 等效 batch=4 全部保留
+
 # 梯度累积版（等效 batch=4）：4090 24GB 下 batch=4 实测峰值 24077MiB（仅 2% 余量），改用 batch=2 × accumulative_counts=2
 # 与 D3（batch=4）公平对比；仅 BN 统计按 micro-batch=2。见 reports/梯度累积等效batch计划.md
 
@@ -14,10 +17,11 @@ data_preprocessor = dict(
 
 # model settings
 model = dict(
-    type='FRBNet',
+    type='FrontNet',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
+        with_cp=True,  # 梯度检查点：降激活显存（OOM 修复，零配置偏差）
         depth=50,
         num_stages=4,
         out_indices=(0, 1, 2, 3),
@@ -101,7 +105,7 @@ train_pipeline = [
         type='MinIoURandomCrop',
         min_ious=(0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_crop_size=0.3),
-    dict(type='RandomResize', scale=[(1500, 1000), (1500, 1000)], keep_ratio=True),
+    dict(type='RandomResize', scale=[(750, 500), (1500, 1000)], keep_ratio=True),
     dict(type='RandomFlip', prob=0.5),
    # dict(type='PhotoMetricDistortion'),
     dict(type='PackDetInputs')

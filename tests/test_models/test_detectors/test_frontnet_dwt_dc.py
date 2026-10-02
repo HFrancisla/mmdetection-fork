@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from mmdet.models.detectors.frbnet_utils import (
+from mmdet.models.detectors.frontnet_utils import (
     ChannelDiffDC,
     DWT_2D,
     FIINet,
@@ -113,14 +113,14 @@ def test_dwt_dc_cascade_zero_detail_arm():
 
 
 def test_fiinet_selects_cascade_without_changing_default(monkeypatch):
-    monkeypatch.delenv('FRBNET_DWT_DC_CASCADE', raising=False)
-    monkeypatch.setenv('FRBNET_FIM', 'dwt_dc')
-    monkeypatch.setenv('FRBNET_DWT_DC_LEVELS', '2')
+    monkeypatch.delenv('FRONTNET_DWT_DC_CASCADE', raising=False)
+    monkeypatch.setenv('FRONTNET_FIM', 'dwt_dc')
+    monkeypatch.setenv('FRONTNET_DWT_DC_LEVELS', '2')
     cascade_net = FIINet(10, 0.1)
     assert isinstance(cascade_net.fim, LearnableDWT2FilterDC)
 
-    monkeypatch.delenv('FRBNET_FIM', raising=False)
-    monkeypatch.delenv('FRBNET_DWT_DC_LEVELS', raising=False)
-    monkeypatch.delenv('FRBNET_V9_LL_LEVELS', raising=False)
+    monkeypatch.delenv('FRONTNET_FIM', raising=False)
+    monkeypatch.delenv('FRONTNET_DWT_DC_LEVELS', raising=False)
+    monkeypatch.delenv('FRONTNET_V9_LL_LEVELS', raising=False)
     default_net = FIINet(10, 0.1)
     assert isinstance(default_net.fim, LearnableDWT3FilterOnlyLL)

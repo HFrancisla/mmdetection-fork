@@ -1,3 +1,12 @@
+# yolov3_baseline_exdark_no_amp.py
+# 用途：在本机复现 autodl 那次 YOLOv3 baseline (ExDark) 的指标。
+# 与 configs/frontnet/yolov3_baseline_exdark.py 的差异（4 处，全部对齐 autodl diag 输出）：
+#   1) optim_wrapper.type: AmpOptimWrapper -> OptimWrapper     （关键：去掉 FP16）
+#   2) seed: 2025 -> 2023                                     （autodl 用的种子）
+#   3) param_scheduler MultiStepLR milestones: [8, 15] -> [18, 23]  （autodl 的 LR 调度）
+#   4) val_interval: 5 -> 1                                    （autodl 每 epoch 都 val）
+# 其余字段（model / data_root / pipeline / epochs / lr / batch / workers / load_from）保持不变。
+
 _base_ = ['../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py']
 load_from = '/home/ipr4090/2024_hzf/mmdetection/checkpoints/yolov3_d53_mstrain-608_273e_coco_20210518_115020-a2c3acb8.pth'
 
@@ -8,9 +17,10 @@ data_preprocessor = dict(
     bgr_to_rgb=True,
     pad_size_divisor=32)
 
-# model settings
+# model settings (baseline: pure YOLOv3, NO FrontNet)
 model = dict(
-    type='FRBNet',
+    type='YOLOV3',
+    data_preprocessor=data_preprocessor,
     backbone=dict(
         type='Darknet',
         depth=53,
@@ -49,21 +59,18 @@ model = dict(
             use_sigmoid=True,
             loss_weight=2.0,
             reduction='sum'),
-        loss_wh=dict(type='MSELoss', 
-            loss_weight=2.0, 
+        loss_wh=dict(type='MSELoss',
+            loss_weight=2.0,
             reduction='sum')),
     # training and testing settings
     train_cfg=dict(assigner=dict(type='GridAssigner', pos_iou_thr=0.5, neg_iou_thr=0.5, min_pos_iou=0)),
-    test_cfg=dict(nms_pre=1000, min_bbox_size=0, score_thr=0.05, conf_thr=0.005, nms=dict(type='nms', iou_threshold=0.45), max_per_img=100),
-    number_K=10,
-    lamda=0.1
-    )
+    test_cfg=dict(nms_pre=1000, min_bbox_size=0, score_thr=0.05, conf_thr=0.005, nms=dict(type='nms', iou_threshold=0.45), max_per_img=100))
 
 # dataset settings
 dataset_type = 'ExDarkVocDataset'
 data_root = '/home/ipr4090/2024_hzf/Datasets/Exdark_VOC'
 randomness = dict(
-    seed = 2025,
+    seed=2023,           # 改 #2：autodl seed
     diff_rank_seed=True,
 )
 
@@ -79,7 +86,6 @@ train_pipeline = [
         min_crop_size=0.3),
     dict(type='RandomResize', scale=[(320, 320), (608, 608)], keep_ratio=True),
     dict(type='RandomFlip', prob=0.5),
-   # dict(type='PhotoMetricDistortion'),
     dict(type='PackDetInputs')
 ]
 test_pipeline = [
@@ -141,20 +147,20 @@ val_evaluator = dict(
     eval_mode='area')
 test_evaluator = val_evaluator
 
-train_cfg = dict(max_epochs=24, val_interval=5)
+train_cfg = dict(max_epochs=24, val_interval=1)   # 改 #4：每 epoch 验证
 
+# 改 #1：去掉 AMP，纯 FP32 训练
 optim_wrapper = dict(
-    type='AmpOptimWrapper',
+    type='OptimWrapper',
     optimizer=dict(type='SGD', lr=0.001, momentum=0.9, weight_decay=0.0005),
     clip_grad=dict(max_norm=35, norm_type=2))
 
+# 改 #3：LR 在 epoch 18、23 下降
 param_scheduler = [
     dict(type='LinearLR', start_factor=0.1, by_epoch=False, begin=0, end=1000),
-    dict(type='MultiStepLR', by_epoch=True, milestones=[8, 15], gamma=0.1)
+    dict(type='MultiStepLR', by_epoch=True, milestones=[18, 23], gamma=0.1)
 ]
 
 default_hooks = dict(checkpoint=dict(type='CheckpointHook', interval=5, max_keep_ckpts=2))
 
 auto_scale_lr = dict(base_batch_size=16)
-
-
