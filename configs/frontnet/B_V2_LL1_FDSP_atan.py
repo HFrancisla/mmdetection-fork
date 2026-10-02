@@ -2,8 +2,6 @@ _base_ = ['./tood_frontnet_exdark.py']
 
 # V2 FDSP front-end ablation. The base ExDark × TOOD recipe is inherited.
 model = dict(
-    fim='dwt_fdsp',
-    fdsp_levels=[1],
     fdsp_mean_center=False,
     fdsp_use_atan=True,
     fdsp_alpha=1.6,

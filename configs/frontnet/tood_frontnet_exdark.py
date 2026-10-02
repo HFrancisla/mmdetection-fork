@@ -75,8 +75,7 @@ model = dict(
         score_thr=0.05,
         nms=dict(type='nms', iou_threshold=0.6),
         max_per_img=100),
-    number_K=10,
-    lamda=0.1)
+    )
 # dataset settings
 dataset_type = 'ExDarkVocDataset'
 data_root = '/home/ipr4090/2024_hzf/Datasets/Exdark_VOC'
@@ -183,4 +182,3 @@ default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', interval=5, max_keep_ckpts=2))
 
 auto_scale_lr = dict(base_batch_size=16)
-

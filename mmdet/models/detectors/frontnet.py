@@ -4,7 +4,7 @@ from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
 from .base import BaseDetector
-from .frontnet_utils import FIINet
+from .frontnet_utils import FrontNet as FrontNetFrontend
 
 class FrontNetBaseDetector(BaseDetector):
     def __init__(self,
@@ -15,10 +15,6 @@ class FrontNetBaseDetector(BaseDetector):
                 test_cfg: OptConfigType = None,
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
-                number_K = 10,
-                lamda = 0.1,
-                fim = None,
-                fdsp_levels = (1, 2, 3),
                 fdsp_mean_center = False,
                 fdsp_use_atan = False,
                 fdsp_alpha = 1.6,
@@ -36,11 +32,7 @@ class FrontNetBaseDetector(BaseDetector):
         self.bbox_head = MODELS.build(bbox_head)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
-        self.front_net = FIINet(
-            number_K,
-            lamda,
-            fim=fim,
-            fdsp_levels=fdsp_levels,
+        self.front_net = FrontNetFrontend(
             fdsp_mean_center=fdsp_mean_center,
             fdsp_use_atan=fdsp_use_atan,
             fdsp_alpha=fdsp_alpha,
@@ -49,15 +41,6 @@ class FrontNetBaseDetector(BaseDetector):
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, local_metadata: dict, strict: bool, missing_keys: Union[List[str], str], 
                               unexpected_keys: Union[List[str], str], error_msgs: Union[List[str], str]) -> None:
-        # Keep loading checkpoints created before the FRBNet -> FrontNet rename.
-        legacy_frontend_prefix = (prefix + '.' if prefix else '') + 'frb_net.'
-        frontend_prefix = (prefix + '.' if prefix else '') + 'front_net.'
-        for key in list(state_dict.keys()):
-            if key.startswith(legacy_frontend_prefix):
-                migrated_key = frontend_prefix + key[len(legacy_frontend_prefix):]
-                state_dict.setdefault(migrated_key, state_dict[key])
-                del state_dict[key]
-
         bbox_head_prefix = prefix + '.bbox_head' if prefix else 'bbox_head'
         bbox_head_keys = [
             k for k in state_dict.keys() if k.startswith(bbox_head_prefix)
@@ -108,10 +91,6 @@ class FrontNet(FrontNetBaseDetector):
                 test_cfg: OptConfigType = None,
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
-                number_K = 10,
-                lamda = 0.1,
-                fim = None,
-                fdsp_levels = (1, 2, 3),
                 fdsp_mean_center = False,
                 fdsp_use_atan = False,
                 fdsp_alpha = 1.6,
@@ -125,10 +104,6 @@ class FrontNet(FrontNetBaseDetector):
             test_cfg=test_cfg,
             data_preprocessor=data_preprocessor,
             init_cfg=init_cfg,
-            number_K=number_K,
-            lamda=lamda,
-            fim=fim,
-            fdsp_levels=fdsp_levels,
             fdsp_mean_center=fdsp_mean_center,
             fdsp_use_atan=fdsp_use_atan,
             fdsp_alpha=fdsp_alpha,

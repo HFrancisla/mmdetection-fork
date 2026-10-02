@@ -15,6 +15,8 @@ data_preprocessor = dict(
 model = dict(
     type='FrontNet',
     data_preprocessor=data_preprocessor,
+    fdsp_input_mean=[0., 0., 0.],
+    fdsp_input_std=[255., 255., 255.],
     backbone=dict(
         type='Darknet',
         depth=53,
@@ -57,9 +59,7 @@ model = dict(
     # training and testing settings
     train_cfg=dict(assigner=dict(type='GridAssigner', pos_iou_thr=0.5, neg_iou_thr=0.5, min_pos_iou=0)),
     test_cfg = dict(nms_pre=1000, min_bbox_size=0, score_thr=0.05, conf_thr=0.005, nms=dict(type='nms', iou_thr=0.55), max_per_img=100),
-    number_K=10,
-    lamda=0.1
-    )
+)
 # dataset settings
 dataset_type = 'DarkFaceDataset'
 data_root = '/home/ipr4090/2024_hzf/Datasets/Darkface_FRBNet_3-1-1/'
