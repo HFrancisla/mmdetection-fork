@@ -17,6 +17,7 @@ class FrontNetBaseDetector(BaseDetector):
                 init_cfg: OptMultiConfig = None,
                 fdsp_mean_center = False,
                 fdsp_use_atan = False,
+                fdsp_use_residual = False,
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
                 fdsp_input_std = (58.395, 57.12, 57.375)
@@ -35,6 +36,7 @@ class FrontNetBaseDetector(BaseDetector):
         self.front_net = FrontNetFrontend(
             fdsp_mean_center=fdsp_mean_center,
             fdsp_use_atan=fdsp_use_atan,
+            fdsp_use_residual=fdsp_use_residual,
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
             fdsp_input_std=fdsp_input_std)
@@ -93,6 +95,7 @@ class FrontNet(FrontNetBaseDetector):
                 init_cfg: OptMultiConfig = None,
                 fdsp_mean_center = False,
                 fdsp_use_atan = False,
+                fdsp_use_residual = False,
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
                 fdsp_input_std = (58.395, 57.12, 57.375)) -> None:
@@ -106,6 +109,7 @@ class FrontNet(FrontNetBaseDetector):
             init_cfg=init_cfg,
             fdsp_mean_center=fdsp_mean_center,
             fdsp_use_atan=fdsp_use_atan,
+            fdsp_use_residual=fdsp_use_residual,
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
             fdsp_input_std=fdsp_input_std

@@ -136,10 +136,12 @@ class FrontNet(nn.Module):
     def __init__(self,
                  fdsp_mean_center=False,
                  fdsp_use_atan=False,
+                 fdsp_use_residual=False,
                  fdsp_alpha=1.6,
                  fdsp_input_mean=(123.675, 116.28, 103.53),
                  fdsp_input_std=(58.395, 57.12, 57.375)):
         super(FrontNet, self).__init__()
+        self.fdsp_use_residual = bool(fdsp_use_residual)
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
                                            nn.BatchNorm2d(24),
                                            nn.LeakyReLU()])
@@ -159,6 +161,8 @@ class FrontNet(nn.Module):
 
     def forward(self, x):
         feat_f = self.dwtnet(x)
+        if self.fdsp_use_residual:
+            feat_f = feat_f + x
         feat_spatial = self.spatial_net(x)
         feat_spectral = self.spectral_net(feat_f)
         feat_agg = torch.concat((feat_spatial, feat_spectral), dim=1)

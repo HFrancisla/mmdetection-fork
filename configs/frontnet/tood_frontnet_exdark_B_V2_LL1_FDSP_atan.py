@@ -4,6 +4,7 @@ _base_ = ['./tood_frontnet_exdark.py']
 model = dict(
     fdsp_mean_center=False,
     fdsp_use_atan=True,
+    fdsp_use_residual=False,
     fdsp_alpha=1.6,
     fdsp_input_mean=[123.675, 116.28, 103.53],
     fdsp_input_std=[58.395, 57.12, 57.375])
