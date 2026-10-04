@@ -1,9 +1,9 @@
 _base_ = ['./tood_frontnet_exdark.py']
 
 # V2: the LL subband is log-transformed after DWT.
-# Full factorial ablation: atan, DWTNet residual, and mean_center.
+# Legacy mc0/mc1 filenames remain for historical checkpoint paths.
+# Both variants now use the same model settings because FDSP uses spatial differences.
 model = dict(
-    fdsp_mean_center=True,
     fdsp_use_atan=False,
     fdsp_use_residual=True,
     fdsp_alpha=1.6,

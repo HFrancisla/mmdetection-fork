@@ -3,7 +3,6 @@ _base_ = ['./tood_frontnet_exdark.py']
 # Apply log only to the first-level LL band, then process each RGB channel
 # independently with FDSP and its own learned scale and bias.
 model = dict(
-    fdsp_mean_center=False,
     fdsp_use_atan=False,
     fdsp_use_residual=False,
     fdsp_alpha=1.6,

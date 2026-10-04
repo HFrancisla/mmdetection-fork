@@ -49,21 +49,28 @@ class DWTNet(nn.Module):
 
     The original FDSP definition is single-channel; processing each RGB
     channel independently is the three-channel adaptation used by this model.
-    Any finite alpha is accepted so experiments can also test alpha <= 1.
+    ``fdsp_direction`` selects diagonal (the original), horizontal, or vertical
+    pixel pairs. Any finite alpha is accepted so experiments can also test
+    alpha <= 1.
     """
 
     def __init__(self,
-                 mean_center=False,
                  use_atan=False,
                  alpha=1.6,
                  input_mean=(123.675, 116.28, 103.53),
-                 input_std=(58.395, 57.12, 57.375)):
+                 input_std=(58.395, 57.12, 57.375),
+                 fdsp_direction='diagonal'):
         super().__init__()
-        self.mean_center = bool(mean_center)
         self.use_atan = bool(use_atan)
         self.alpha = float(alpha)
         if not math.isfinite(self.alpha):
             raise ValueError(f'FDSP alpha must be finite, got {alpha!r}')
+        valid_directions = ('diagonal', 'horizontal', 'vertical')
+        if fdsp_direction not in valid_directions:
+            raise ValueError(
+                'fdsp_direction must be one of diagonal, horizontal or '
+                f'vertical, got {fdsp_direction!r}')
+        self.fdsp_direction = fdsp_direction
         self.input_mean = self._validate_rgb_values(input_mean, 'input_mean')
         self.input_std = self._validate_rgb_values(input_std, 'input_std')
         if any(value <= 0 for value in self.input_std):
@@ -88,8 +95,15 @@ class DWTNet(nn.Module):
         i2 = padded[:, :, :-1, 1:]
         i3 = padded[:, :, 1:, :-1]
         i4 = padded[:, :, 1:, 1:]
-        d1 = i1 - i4
-        d2 = i2 - i3
+        if self.fdsp_direction == 'diagonal':
+            d1 = i1 - i4
+            d2 = i2 - i3
+        elif self.fdsp_direction == 'horizontal':
+            d1 = i1 - i2
+            d2 = i3 - i4
+        else:  # vertical
+            d1 = i1 - i3
+            d2 = i2 - i4
         response = (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
         if self.use_atan:
             response = torch.atan(4.0 * response)
@@ -97,8 +111,6 @@ class DWTNet(nn.Module):
 
     def _process_ll(self, subband):
         subband = torch.log(subband.clamp(min=1e-6))
-        if self.mean_center:
-            subband = subband - subband.mean(dim=(2, 3), keepdim=True)
 
         # Keep the R/G/B paths explicitly independent, as in the LL-FDSP
         # diagram: FDSP(R) * W1 + b1, FDSP(G) * W2 + b2, FDSP(B) * W3 + b3.
@@ -138,12 +150,12 @@ class FrontNet(nn.Module):
     """Combine the spatial path with a single-level DWT spectral path."""
 
     def __init__(self,
-                 fdsp_mean_center=False,
                  fdsp_use_atan=False,
                  fdsp_use_residual=False,
                  fdsp_alpha=1.6,
                  fdsp_input_mean=(123.675, 116.28, 103.53),
-                 fdsp_input_std=(58.395, 57.12, 57.375)):
+                 fdsp_input_std=(58.395, 57.12, 57.375),
+                 fdsp_direction='diagonal'):
         super(FrontNet, self).__init__()
         self.fdsp_use_residual = bool(fdsp_use_residual)
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
@@ -157,11 +169,11 @@ class FrontNet(nn.Module):
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
         self.dwtnet = DWTNet(
-            mean_center=fdsp_mean_center,
             use_atan=fdsp_use_atan,
             alpha=fdsp_alpha,
             input_mean=fdsp_input_mean,
-            input_std=fdsp_input_std)
+            input_std=fdsp_input_std,
+            fdsp_direction=fdsp_direction)
 
     def forward(self, x):
         feat_f = self.dwtnet(x)
