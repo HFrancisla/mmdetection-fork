@@ -15,12 +15,12 @@ class FrontNetBaseDetector(BaseDetector):
                 test_cfg: OptConfigType = None,
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
-                fdsp_mean_center = False,
                 fdsp_use_atan = False,
                 fdsp_use_residual = False,
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
-                fdsp_input_std = (58.395, 57.12, 57.375)
+                fdsp_input_std = (58.395, 57.12, 57.375),
+                fdsp_direction = 'diagonal'
                 )-> None:
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
@@ -34,12 +34,12 @@ class FrontNetBaseDetector(BaseDetector):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.front_net = FrontNetFrontend(
-            fdsp_mean_center=fdsp_mean_center,
             fdsp_use_atan=fdsp_use_atan,
             fdsp_use_residual=fdsp_use_residual,
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
-            fdsp_input_std=fdsp_input_std)
+            fdsp_input_std=fdsp_input_std,
+            fdsp_direction=fdsp_direction)
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, local_metadata: dict, strict: bool, missing_keys: Union[List[str], str], 
                               unexpected_keys: Union[List[str], str], error_msgs: Union[List[str], str]) -> None:
@@ -93,12 +93,12 @@ class FrontNet(FrontNetBaseDetector):
                 test_cfg: OptConfigType = None,
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
-                fdsp_mean_center = False,
                 fdsp_use_atan = False,
                 fdsp_use_residual = False,
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
-                fdsp_input_std = (58.395, 57.12, 57.375)) -> None:
+                fdsp_input_std = (58.395, 57.12, 57.375),
+                fdsp_direction = 'diagonal') -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -107,10 +107,10 @@ class FrontNet(FrontNetBaseDetector):
             test_cfg=test_cfg,
             data_preprocessor=data_preprocessor,
             init_cfg=init_cfg,
-            fdsp_mean_center=fdsp_mean_center,
             fdsp_use_atan=fdsp_use_atan,
             fdsp_use_residual=fdsp_use_residual,
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
-            fdsp_input_std=fdsp_input_std
+            fdsp_input_std=fdsp_input_std,
+            fdsp_direction=fdsp_direction
             )

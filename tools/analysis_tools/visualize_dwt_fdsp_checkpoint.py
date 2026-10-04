@@ -215,11 +215,8 @@ def infer_and_capture(model, image_path: Path):
 
     def recording_process(module, subband):
         result = original_process(subband)
-        centered = subband
-        if module.mean_center:
-            centered = centered - centered.mean(dim=(2, 3), keepdim=True)
         captured['ll_pre'] = cpu_tensor(subband)
-        captured['fdsp_raw'] = cpu_tensor(module._fdsp(centered))
+        captured['fdsp_raw'] = cpu_tensor(module._fdsp(subband))
         captured['ll_prime'] = cpu_tensor(result)
         return result
 
@@ -849,8 +846,8 @@ def main():
         'checkpoint': str(checkpoint_path),
         'model_settings': {
             'fdsp_alpha': dwtnet.alpha,
-            'fdsp_mean_center': dwtnet.mean_center,
             'fdsp_use_atan': dwtnet.use_atan,
+            'fdsp_direction': dwtnet.fdsp_direction,
             'dwt': 'one-level Haar DWT',
         },
         'input_transform': {
