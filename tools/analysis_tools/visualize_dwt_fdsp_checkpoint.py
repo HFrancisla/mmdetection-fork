@@ -668,7 +668,7 @@ def parse_args():
     parser.add_argument('--annotation-subdir',
                         help='XML directory; defaults to the dataset setting or Annotations.')
     parser.add_argument('--output-dir', type=Path,
-                        help='Output directory; defaults to work_dirs/visualizations/<checkpoint>.')
+                        help='Output directory; defaults to tmp/results/visualizations/<checkpoint>.')
     parser.add_argument('--device', default='cuda:0')
     return parser.parse_args()
 
@@ -709,7 +709,7 @@ def main():
         'ann_subdir', 'Annotations')
     dataset_name = dataset_cfg.get('type', 'XML dataset')
     output_dir = args.output_dir or (
-        REPO_ROOT / 'work_dirs' / 'visualizations' / checkpoint_path.stem)
+        REPO_ROOT / 'tmp' / 'results' / 'visualizations' / checkpoint_path.stem)
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     samples_dir = output_dir / 'samples'

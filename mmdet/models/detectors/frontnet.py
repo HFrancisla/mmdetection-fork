@@ -15,6 +15,7 @@ class FrontNetBaseDetector(BaseDetector):
                 test_cfg: OptConfigType = None,
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
+                frontnet_use_shortcut=False,
                 fdsp_use_atan = False,
                 fdsp_use_residual = False,
                 fdsp_alpha = 1.6,
@@ -33,6 +34,7 @@ class FrontNetBaseDetector(BaseDetector):
         self.bbox_head = MODELS.build(bbox_head)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+        self.frontnet_use_shortcut = bool(frontnet_use_shortcut)
         self.front_net = FrontNetFrontend(
             fdsp_use_atan=fdsp_use_atan,
             fdsp_use_residual=fdsp_use_residual,
@@ -79,6 +81,8 @@ class FrontNetBaseDetector(BaseDetector):
     
     def extract_feat(self, batch_inputs: Tensor) -> Tuple[Tensor]:
         out = self.front_net(batch_inputs)
+        if self.frontnet_use_shortcut:
+            out = out + batch_inputs
         out = self.backbone(out)
         fpn_out = self.neck(out)
         return fpn_out
@@ -93,6 +97,7 @@ class FrontNet(FrontNetBaseDetector):
                 test_cfg: OptConfigType = None,
                 data_preprocessor: OptConfigType = None,
                 init_cfg: OptMultiConfig = None,
+                frontnet_use_shortcut=False,
                 fdsp_use_atan = False,
                 fdsp_use_residual = False,
                 fdsp_alpha = 1.6,
@@ -107,6 +112,7 @@ class FrontNet(FrontNetBaseDetector):
             test_cfg=test_cfg,
             data_preprocessor=data_preprocessor,
             init_cfg=init_cfg,
+            frontnet_use_shortcut=frontnet_use_shortcut,
             fdsp_use_atan=fdsp_use_atan,
             fdsp_use_residual=fdsp_use_residual,
             fdsp_alpha=fdsp_alpha,

@@ -11,9 +11,7 @@ data_preprocessor = dict(
 
 # model settings
 model = dict(
-    type='FrontNet',
-    frontnet_use_shortcut=False,
-    fdsp_direction='diagonal',
+    type='TOOD',
     data_preprocessor=data_preprocessor,
     backbone=dict(
         type='ResNet',
@@ -82,7 +80,7 @@ model = dict(
 dataset_type = 'ExDarkVocDataset'
 data_root = '/home/ipr4090/2024_hzf/Datasets/Exdark_VOC'
 randomness = dict(
-    seed = 6,
+    seed = 1,
     diff_rank_seed=True,
 )
 
