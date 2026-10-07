@@ -12,6 +12,7 @@ data_preprocessor = dict(
 # model settings
 model = dict(
     type='FrontNet',
+    frontnet_use_shortcut=False,
     fdsp_direction='diagonal',
     data_preprocessor=data_preprocessor,
     backbone=dict(

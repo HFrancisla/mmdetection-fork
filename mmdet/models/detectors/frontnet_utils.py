@@ -4,54 +4,16 @@ import torch.nn as nn
 import torch
 
 
-class DWT_2D(nn.Module):
-    """Haar 2-D DWT via pixel_unshuffle. (B,C,H,W) -> (B,4C,H/2,W/2) [LL,LH,HL,HH]."""
+class FDSPNet(nn.Module):
+    """Log-normalize RGB input and apply FDSP independently per channel.
 
-    def forward(self, x):
-        xu = F.pixel_unshuffle(x, 2)
-        b, c4, h2, w2 = xu.shape
-        c = c4 // 4
-        xu = xu.view(b, c, 4, h2, w2)
-        x_ee, x_eo, x_oe, x_oo = xu[:, :, 0], xu[:, :, 1], xu[:, :, 2], xu[:, :, 3]
-        ll = (x_ee + x_eo + x_oe + x_oo) * 0.5
-        lh = (x_ee - x_eo + x_oe - x_oo) * 0.5
-        hl = (x_ee + x_eo - x_oe - x_oo) * 0.5
-        hh = (x_ee - x_eo - x_oe + x_oo) * 0.5
-        return torch.cat([ll, lh, hl, hh], dim=1)
-
-
-class IDWT_2D(nn.Module):
-    """Haar 2-D IDWT via pixel_shuffle. (B,4C,H/2,W/2) [LL,LH,HL,HH] -> (B,C,H,W)."""
-
-    def forward(self, x):
-        b, c4, h2, w2 = x.shape
-        c = c4 // 4
-        x = x.view(b, 4, c, h2, w2)
-        ll, lh, hl, hh = x[:, 0], x[:, 1], x[:, 2], x[:, 3]
-        x_ee = (ll + lh + hl + hh) * 0.5
-        x_eo = (ll - lh + hl - hh) * 0.5
-        x_oe = (ll + lh - hl - hh) * 0.5
-        x_oo = (ll - lh - hl + hh) * 0.5
-        x = torch.stack([x_ee, x_eo, x_oe, x_oo], dim=2)
-        x = x.view(b, c * 4, h2, w2)
-        return F.pixel_shuffle(x, 2)
-
-
-class DWTNet(nn.Module):
-    """Apply per-channel FDSP to the first-level LL band and reconstruct.
-
-    Detector inputs are normalized RGB tensors. This module first restores RGB
-    pixel values using the data-preprocessor statistics, maps them to [0, 1],
-    and takes the logarithm. On LL1 it applies the 2-D FDSP
-    response independently to R, G, and B and optionally applies atan(4 *
-    response). A learned affine
-    transform follows FDSP. The first-level Haar detail bands pass through raw.
-
-    The original FDSP definition is single-channel; processing each RGB
-    channel independently is the three-channel adaptation used by this model.
-    ``fdsp_direction`` selects diagonal (the original), horizontal, or vertical
-    pixel pairs. Any finite alpha is accepted so experiments can also test
-    alpha <= 1.
+    Detector inputs are normalized RGB tensors. Restore pixel values using
+    the data-preprocessor statistics, map them to [0, 1], take the logarithm,
+    then compute FDSP for R, G, and B independently. The three responses are
+    concatenated in RGB order and passed through the original learned
+    per-channel scale and bias. ``fdsp_direction`` selects diagonal (the
+    original), horizontal, or vertical pixel pairs. Any finite alpha is
+    accepted so experiments can also test alpha <= 1.
     """
 
     def __init__(self,
@@ -76,9 +38,8 @@ class DWTNet(nn.Module):
         if any(value <= 0 for value in self.input_std):
             raise ValueError('FDSP input_std values must all be positive')
 
-        self.dwt = DWT_2D()
-        self.idwt = IDWT_2D()
-        # Keep the ll1 state-dict keys used by the existing one-level models.
+        # Preserve DWTNet's learnable per-channel affine transform and its
+        # initialization; only the wavelet decomposition/reconstruction is removed.
         self.scale_by_level = nn.ParameterDict(
             {'ll1': nn.Parameter(torch.full((3,), 0.3))})
         self.bias_by_level = nn.ParameterDict(
@@ -112,38 +73,24 @@ class DWTNet(nn.Module):
             response = torch.atan(4.0 * response)
         return response
 
-    def _process_ll(self, subband):
-        response = self._fdsp(subband)
-        scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
-        bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
-        return response * scale + bias
-
     def forward(self, img):
         if img.ndim != 4 or img.shape[1] != 3:
             raise ValueError(
-                'DWTNet expects an (N, 3, H, W) normalized RGB tensor, '
+                'FDSPNet expects an (N, 3, H, W) normalized RGB tensor, '
                 f'got {tuple(img.shape)}')
-        _, _, h, w = img.shape
         mean = img.new_tensor(self.input_mean).view(1, 3, 1, 1)
         std = img.new_tensor(self.input_std).view(1, 3, 1, 1)
         x = ((img * std + mean).clamp(min=0.0, max=255.0) / 255.0)
         x = torch.log(x.clamp(min=1e-6))
-
-        pad_h = (-h) % 2
-        pad_w = (-w) % 2
-        if pad_h or pad_w:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
-
-        ll, lh, hl, hh = self.dwt(x).chunk(4, dim=1)
-        ll = self._process_ll(ll)
-        out = self.idwt(torch.cat((ll, lh, hl, hh), dim=1))
-        if pad_h or pad_w:
-            out = out[:, :, :h, :w]
-        return out
+        per_channel = [self._fdsp(channel) for channel in x.split(1, dim=1)]
+        response = torch.cat(per_channel, dim=1)
+        scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
+        bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
+        return response * scale + bias
 
 
 class FrontNet(nn.Module):
-    """Combine the spatial path with a single-level DWT spectral path."""
+    """Combine the spatial path with a direct RGB FDSP path."""
 
     def __init__(self,
                  fdsp_use_atan=False,
@@ -164,7 +111,7 @@ class FrontNet(nn.Module):
                                         nn.BatchNorm2d(32),
                                         nn.LeakyReLU(),
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
-        self.dwtnet = DWTNet(
+        self.fdspnet = FDSPNet(
             use_atan=fdsp_use_atan,
             alpha=fdsp_alpha,
             input_mean=fdsp_input_mean,
@@ -172,7 +119,7 @@ class FrontNet(nn.Module):
             fdsp_direction=fdsp_direction)
 
     def forward(self, x):
-        feat_f = self.dwtnet(x)
+        feat_f = self.fdspnet(x)
         if self.fdsp_use_residual:
             feat_f = feat_f + x
         feat_spatial = self.spatial_net(x)
