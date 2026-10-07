@@ -8,7 +8,7 @@ model = dict(
     fdsp_input_mean=[123.675, 116.28, 103.53],
     fdsp_input_std=[58.395, 57.12, 57.375])
 
-work_dir = 'work_dirs/b_v2_ll1_fdsp_noatan_tood_exdark_seed6'
+work_dir = 'tmp/results/b_v2_ll1_fdsp_noatan_tood_exdark_seed6'
 
 # Match FrontNet ExDark × TOOD; invoke once for run1 (seed=6).
 randomness = dict(seed=6, diff_rank_seed=True)

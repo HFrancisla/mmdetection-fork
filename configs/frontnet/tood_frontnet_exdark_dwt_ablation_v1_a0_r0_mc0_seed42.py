@@ -11,7 +11,7 @@ model = dict(
     fdsp_input_std=[58.395, 57.12, 57.375])
 
 randomness = dict(seed=42, diff_rank_seed=True)
-work_dir = 'work_dirs/dwt_ablation_v1_a0_r0_mc0_seed42'
+work_dir = 'tmp/results/dwt_ablation_v1_a0_r0_mc0_seed42'
 
 # Train on ExDark train, select the best checkpoint on val, then test on test.txt.
 train_dataloader = dict(batch_size=8)
