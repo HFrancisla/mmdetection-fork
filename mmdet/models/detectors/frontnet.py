@@ -21,7 +21,14 @@ class FrontNetBaseDetector(BaseDetector):
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
                 fdsp_input_std = (58.395, 57.12, 57.375),
-                fdsp_direction = 'diagonal'
+                fdsp_direction = 'diagonal',
+                fdsp_adaptive_ll_gain = False,
+                fdsp_ll_gain_hidden = 8,
+                dwt_adaptive_subband_gate = False,
+                dwt_subband_gate_hidden = 8,
+                fdsp_adaptive_direction = False,
+                fdsp_direction_hidden = 8,
+                fdsp_direction_temperature = 1.0
                 )-> None:
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
@@ -41,7 +48,14 @@ class FrontNetBaseDetector(BaseDetector):
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
             fdsp_input_std=fdsp_input_std,
-            fdsp_direction=fdsp_direction)
+            fdsp_direction=fdsp_direction,
+            fdsp_adaptive_ll_gain=fdsp_adaptive_ll_gain,
+            fdsp_ll_gain_hidden=fdsp_ll_gain_hidden,
+            dwt_adaptive_subband_gate=dwt_adaptive_subband_gate,
+            dwt_subband_gate_hidden=dwt_subband_gate_hidden,
+            fdsp_adaptive_direction=fdsp_adaptive_direction,
+            fdsp_direction_hidden=fdsp_direction_hidden,
+            fdsp_direction_temperature=fdsp_direction_temperature)
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, local_metadata: dict, strict: bool, missing_keys: Union[List[str], str], 
                               unexpected_keys: Union[List[str], str], error_msgs: Union[List[str], str]) -> None:
@@ -103,7 +117,14 @@ class FrontNet(FrontNetBaseDetector):
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
                 fdsp_input_std = (58.395, 57.12, 57.375),
-                fdsp_direction = 'diagonal') -> None:
+                fdsp_direction = 'diagonal',
+                fdsp_adaptive_ll_gain = False,
+                fdsp_ll_gain_hidden = 8,
+                dwt_adaptive_subband_gate = False,
+                dwt_subband_gate_hidden = 8,
+                fdsp_adaptive_direction = False,
+                fdsp_direction_hidden = 8,
+                fdsp_direction_temperature = 1.0) -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -118,5 +139,12 @@ class FrontNet(FrontNetBaseDetector):
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
             fdsp_input_std=fdsp_input_std,
-            fdsp_direction=fdsp_direction
+            fdsp_direction=fdsp_direction,
+            fdsp_adaptive_ll_gain=fdsp_adaptive_ll_gain,
+            fdsp_ll_gain_hidden=fdsp_ll_gain_hidden,
+            dwt_adaptive_subband_gate=dwt_adaptive_subband_gate,
+            dwt_subband_gate_hidden=dwt_subband_gate_hidden,
+            fdsp_adaptive_direction=fdsp_adaptive_direction,
+            fdsp_direction_hidden=fdsp_direction_hidden,
+            fdsp_direction_temperature=fdsp_direction_temperature
             )

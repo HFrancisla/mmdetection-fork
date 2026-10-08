@@ -38,14 +38,20 @@ class IDWT_2D(nn.Module):
 
 
 class DWTNet(nn.Module):
-    """Apply log-domain, per-channel FDSP to the first-level LL band.
+    """Apply log-domain FDSP to LL with optional lightweight adaptation.
 
     Detector inputs are normalized RGB tensors. This module restores RGB pixel
     values using the data-preprocessor statistics, maps them to [0, 1], and
     applies a one-level Haar DWT. It then takes the logarithm of LL only,
-    applies FDSP independently to R, G, and B, and learns a separate affine
-    scale and bias for each channel. The LH, HL, and HH bands pass through
-    unchanged before the inverse DWT.
+    applies FDSP, and reconstructs with IDWT.
+
+    Three V3 mechanisms are independently switchable:
+    1. adaptive LL gain: image-conditioned per-channel FDSP gain with an LL
+       residual;
+    2. adaptive subband gate: image-conditioned LL/LH/HL/HH scalar gates;
+    3. adaptive direction: softmax fusion of diagonal/horizontal/vertical FDSP.
+
+    With all three switches disabled the implementation follows V2 exactly.
 
     The original FDSP definition is single-channel; processing each RGB
     channel independently is the three-channel adaptation used by this model.
@@ -59,7 +65,14 @@ class DWTNet(nn.Module):
                  alpha=1.6,
                  input_mean=(123.675, 116.28, 103.53),
                  input_std=(58.395, 57.12, 57.375),
-                 fdsp_direction='diagonal'):
+                 fdsp_direction='diagonal',
+                 fdsp_adaptive_ll_gain=False,
+                 fdsp_ll_gain_hidden=8,
+                 dwt_adaptive_subband_gate=False,
+                 dwt_subband_gate_hidden=8,
+                 fdsp_adaptive_direction=False,
+                 fdsp_direction_hidden=8,
+                 fdsp_direction_temperature=1.0):
         super().__init__()
         self.use_atan = bool(use_atan)
         self.alpha = float(alpha)
@@ -71,6 +84,13 @@ class DWTNet(nn.Module):
                 'fdsp_direction must be one of diagonal, horizontal or '
                 f'vertical, got {fdsp_direction!r}')
         self.fdsp_direction = fdsp_direction
+        self.fdsp_adaptive_ll_gain = bool(fdsp_adaptive_ll_gain)
+        self.dwt_adaptive_subband_gate = bool(dwt_adaptive_subband_gate)
+        self.fdsp_adaptive_direction = bool(fdsp_adaptive_direction)
+        self.fdsp_direction_temperature = float(fdsp_direction_temperature)
+        if (not math.isfinite(self.fdsp_direction_temperature)
+                or self.fdsp_direction_temperature <= 0):
+            raise ValueError('fdsp_direction_temperature must be positive')
         self.input_mean = self._validate_rgb_values(input_mean, 'input_mean')
         self.input_std = self._validate_rgb_values(input_std, 'input_std')
         if any(value <= 0 for value in self.input_std):
@@ -81,6 +101,21 @@ class DWTNet(nn.Module):
         self.scale_by_channel = nn.Parameter(torch.full((3,), 0.3))
         self.bias_by_channel = nn.Parameter(torch.zeros(3))
 
+        self.ll_gain_mlp = None
+        if self.fdsp_adaptive_ll_gain:
+            self.ll_gain_mlp = self._build_zero_output_mlp(
+                3, fdsp_ll_gain_hidden, 3)
+
+        self.subband_gate_mlp = None
+        if self.dwt_adaptive_subband_gate:
+            self.subband_gate_mlp = self._build_zero_output_mlp(
+                4, dwt_subband_gate_hidden, 4)
+
+        self.direction_mlp = None
+        if self.fdsp_adaptive_direction:
+            self.direction_mlp = self._build_zero_output_mlp(
+                3, fdsp_direction_hidden, 3)
+
     @staticmethod
     def _validate_rgb_values(values, name):
         values = tuple(float(value) for value in values)
@@ -88,17 +123,30 @@ class DWTNet(nn.Module):
             raise ValueError(f'{name} must contain exactly three RGB values')
         return values
 
-    def _fdsp(self, subband):
+    @staticmethod
+    def _build_zero_output_mlp(in_features, hidden_features, out_features):
+        hidden_features = int(hidden_features)
+        if hidden_features <= 0:
+            raise ValueError('adaptive MLP hidden size must be positive')
+        mlp = nn.Sequential(
+            nn.Linear(in_features, hidden_features),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_features, out_features))
+        nn.init.zeros_(mlp[-1].weight)
+        nn.init.zeros_(mlp[-1].bias)
+        return mlp
+
+    def _fdsp_with_direction(self, subband, direction):
         # Replicate-pad right and bottom so all four shifted views retain H x W.
         padded = F.pad(subband, (0, 1, 0, 1), mode='replicate')
         i1 = padded[:, :, :-1, :-1]
         i2 = padded[:, :, :-1, 1:]
         i3 = padded[:, :, 1:, :-1]
         i4 = padded[:, :, 1:, 1:]
-        if self.fdsp_direction == 'diagonal':
+        if direction == 'diagonal':
             d1 = i1 - i4
             d2 = i2 - i3
-        elif self.fdsp_direction == 'horizontal':
+        elif direction == 'horizontal':
             d1 = i1 - i2
             d2 = i3 - i4
         else:  # vertical
@@ -109,19 +157,61 @@ class DWTNet(nn.Module):
             response = torch.atan(4.0 * response)
         return response
 
-    def _process_ll(self, subband):
-        subband = torch.log(subband.clamp(min=1e-6))
+    def _fdsp(self, subband):
+        return self._fdsp_with_direction(subband, self.fdsp_direction)
 
-        # Keep the R/G/B paths explicitly independent, as in the LL-FDSP
-        # diagram: FDSP(R) * W1 + b1, FDSP(G) * W2 + b2, FDSP(B) * W3 + b3.
-        channel_outputs = []
-        for channel_index in range(3):
-            channel = subband[:, channel_index:channel_index + 1]
-            response = self._fdsp(channel)
-            scale = self.scale_by_channel[channel_index]
-            bias = self.bias_by_channel[channel_index]
-            channel_outputs.append(response * scale + bias)
-        return torch.cat(channel_outputs, dim=1)
+    def _adaptive_fdsp(self, log_subband):
+        context = log_subband.mean(dim=(2, 3))
+        logits = self.direction_mlp(context)
+        weights = F.softmax(
+            logits / self.fdsp_direction_temperature, dim=1)
+        responses = torch.stack([
+            self._fdsp_with_direction(log_subband, 'diagonal'),
+            self._fdsp_with_direction(log_subband, 'horizontal'),
+            self._fdsp_with_direction(log_subband, 'vertical')
+        ], dim=1)
+        return (responses * weights[:, :, None, None, None]).sum(dim=1)
+
+    def _process_ll(self, subband):
+        log_subband = torch.log(subband.clamp(min=1e-6))
+
+        # Keep the exact V2 path when both LL adaptations are disabled.
+        if not self.fdsp_adaptive_direction and not self.fdsp_adaptive_ll_gain:
+            channel_outputs = []
+            for channel_index in range(3):
+                channel = log_subband[:, channel_index:channel_index + 1]
+                response = self._fdsp(channel)
+                scale = self.scale_by_channel[channel_index]
+                bias = self.bias_by_channel[channel_index]
+                channel_outputs.append(response * scale + bias)
+            return torch.cat(channel_outputs, dim=1)
+
+        if self.fdsp_adaptive_direction:
+            response = self._adaptive_fdsp(log_subband)
+        else:
+            response = self._fdsp(log_subband)
+
+        scale = self.scale_by_channel.view(1, 3, 1, 1)
+        bias = self.bias_by_channel.view(1, 3, 1, 1)
+        if not self.fdsp_adaptive_ll_gain:
+            return response * scale + bias
+
+        context = log_subband.mean(dim=(2, 3))
+        gain_delta = torch.tanh(self.ll_gain_mlp(context))
+        dynamic_gain = scale * (1.0 + gain_delta[:, :, None, None])
+        return subband + response * dynamic_gain + bias
+
+    def _apply_subband_gate(self, ll_raw, ll_out, lh, hl, hh):
+        if not self.dwt_adaptive_subband_gate:
+            return ll_out, lh, hl, hh
+        stats = torch.stack([
+            band.abs().mean(dim=(1, 2, 3))
+            for band in (ll_raw, lh, hl, hh)
+        ], dim=1)
+        gates = 1.0 + torch.tanh(self.subband_gate_mlp(stats))
+        return tuple(
+            band * gates[:, index, None, None, None]
+            for index, band in enumerate((ll_out, lh, hl, hh)))
 
     def forward(self, img):
         if img.ndim != 4 or img.shape[1] != 3:
@@ -139,7 +229,10 @@ class DWTNet(nn.Module):
             x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
 
         ll, lh, hl, hh = self.dwt(x).chunk(4, dim=1)
+        ll_raw = ll
         ll = self._process_ll(ll)
+        ll, lh, hl, hh = self._apply_subband_gate(
+            ll_raw, ll, lh, hl, hh)
         out = self.idwt(torch.cat((ll, lh, hl, hh), dim=1))
         if pad_h or pad_w:
             out = out[:, :, :h, :w]
@@ -155,7 +248,14 @@ class FrontNet(nn.Module):
                  fdsp_alpha=1.6,
                  fdsp_input_mean=(123.675, 116.28, 103.53),
                  fdsp_input_std=(58.395, 57.12, 57.375),
-                 fdsp_direction='diagonal'):
+                 fdsp_direction='diagonal',
+                 fdsp_adaptive_ll_gain=False,
+                 fdsp_ll_gain_hidden=8,
+                 dwt_adaptive_subband_gate=False,
+                 dwt_subband_gate_hidden=8,
+                 fdsp_adaptive_direction=False,
+                 fdsp_direction_hidden=8,
+                 fdsp_direction_temperature=1.0):
         super(FrontNet, self).__init__()
         self.fdsp_use_residual = bool(fdsp_use_residual)
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
@@ -173,7 +273,14 @@ class FrontNet(nn.Module):
             alpha=fdsp_alpha,
             input_mean=fdsp_input_mean,
             input_std=fdsp_input_std,
-            fdsp_direction=fdsp_direction)
+            fdsp_direction=fdsp_direction,
+            fdsp_adaptive_ll_gain=fdsp_adaptive_ll_gain,
+            fdsp_ll_gain_hidden=fdsp_ll_gain_hidden,
+            dwt_adaptive_subband_gate=dwt_adaptive_subband_gate,
+            dwt_subband_gate_hidden=dwt_subband_gate_hidden,
+            fdsp_adaptive_direction=fdsp_adaptive_direction,
+            fdsp_direction_hidden=fdsp_direction_hidden,
+            fdsp_direction_temperature=fdsp_direction_temperature)
 
     def forward(self, x):
         feat_f = self.dwtnet(x)
