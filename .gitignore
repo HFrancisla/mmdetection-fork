@@ -122,3 +122,7 @@ work_dirs/
 *.py~
 *.sh~
 .agents/
+
+# Experiment artifacts
+/tmp/logs/
+/tmp/results/
