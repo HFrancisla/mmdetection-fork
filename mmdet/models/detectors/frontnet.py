@@ -21,7 +21,13 @@ class FrontNetBaseDetector(BaseDetector):
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
                 fdsp_input_std = (58.395, 57.12, 57.375),
-                fdsp_direction = 'diagonal'
+                fdsp_direction = 'diagonal',
+                fdsp_dw_mode = 'none',
+                fdsp_dw_act3 = 'leaky_relu',
+                fdsp_dw_act9 = 'sigmoid',
+                fdsp_dw_negative_slope = 0.1,
+                fdsp_dw_residual_init = 0.0,
+                fdsp_use_affine = False
                 )-> None:
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
@@ -41,7 +47,13 @@ class FrontNetBaseDetector(BaseDetector):
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
             fdsp_input_std=fdsp_input_std,
-            fdsp_direction=fdsp_direction)
+            fdsp_direction=fdsp_direction,
+            fdsp_dw_mode=fdsp_dw_mode,
+            fdsp_dw_act3=fdsp_dw_act3,
+            fdsp_dw_act9=fdsp_dw_act9,
+            fdsp_dw_negative_slope=fdsp_dw_negative_slope,
+            fdsp_dw_residual_init=fdsp_dw_residual_init,
+            fdsp_use_affine=fdsp_use_affine)
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, local_metadata: dict, strict: bool, missing_keys: Union[List[str], str], 
                               unexpected_keys: Union[List[str], str], error_msgs: Union[List[str], str]) -> None:
@@ -103,7 +115,13 @@ class FrontNet(FrontNetBaseDetector):
                 fdsp_alpha = 1.6,
                 fdsp_input_mean = (123.675, 116.28, 103.53),
                 fdsp_input_std = (58.395, 57.12, 57.375),
-                fdsp_direction = 'diagonal') -> None:
+                fdsp_direction = 'diagonal',
+                fdsp_dw_mode = 'none',
+                fdsp_dw_act3 = 'leaky_relu',
+                fdsp_dw_act9 = 'sigmoid',
+                fdsp_dw_negative_slope = 0.1,
+                fdsp_dw_residual_init = 0.0,
+                fdsp_use_affine = False) -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -118,5 +136,11 @@ class FrontNet(FrontNetBaseDetector):
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
             fdsp_input_std=fdsp_input_std,
-            fdsp_direction=fdsp_direction
+            fdsp_direction=fdsp_direction,
+            fdsp_dw_mode=fdsp_dw_mode,
+            fdsp_dw_act3=fdsp_dw_act3,
+            fdsp_dw_act9=fdsp_dw_act9,
+            fdsp_dw_negative_slope=fdsp_dw_negative_slope,
+            fdsp_dw_residual_init=fdsp_dw_residual_init,
+            fdsp_use_affine=fdsp_use_affine
             )
