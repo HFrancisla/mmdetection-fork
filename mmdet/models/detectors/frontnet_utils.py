@@ -65,11 +65,13 @@ class DWTNet(nn.Module):
         self.alpha = float(alpha)
         if not math.isfinite(self.alpha):
             raise ValueError(f'FDSP alpha must be finite, got {alpha!r}')
-        valid_directions = ('diagonal', 'horizontal', 'vertical')
+        valid_directions = (
+            'diagonal', 'horizontal', 'vertical',
+            'hv_post_atan', 'hv_pre_atan')
         if fdsp_direction not in valid_directions:
             raise ValueError(
-                'fdsp_direction must be one of diagonal, horizontal or '
-                f'vertical, got {fdsp_direction!r}')
+                f'fdsp_direction must be one of {valid_directions}, '
+                f'got {fdsp_direction!r}')
         self.fdsp_direction = fdsp_direction
         self.input_mean = self._validate_rgb_values(input_mean, 'input_mean')
         self.input_std = self._validate_rgb_values(input_std, 'input_std')
@@ -88,23 +90,53 @@ class DWTNet(nn.Module):
             raise ValueError(f'{name} must contain exactly three RGB values')
         return values
 
-    def _fdsp(self, subband):
-        # Replicate-pad right and bottom so all four shifted views retain H x W.
+    def _fdsp_raw(self, subband, direction):
+        """Compute an FDSP direction without the optional atan transform."""
+        # Same 2x2 shifts, padding, and FDSP formula as the V2 baseline.
         padded = F.pad(subband, (0, 1, 0, 1), mode='replicate')
         i1 = padded[:, :, :-1, :-1]
         i2 = padded[:, :, :-1, 1:]
         i3 = padded[:, :, 1:, :-1]
         i4 = padded[:, :, 1:, 1:]
-        if self.fdsp_direction == 'diagonal':
+        if direction == 'diagonal':
             d1 = i1 - i4
             d2 = i2 - i3
-        elif self.fdsp_direction == 'horizontal':
+        elif direction == 'horizontal':
             d1 = i1 - i2
             d2 = i3 - i4
-        else:  # vertical
+        elif direction == 'vertical':
             d1 = i1 - i3
             d2 = i2 - i4
-        response = (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
+        else:
+            raise ValueError(f'unsupported FDSP direction: {direction!r}')
+        return (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
+
+    def _fdsp(self, subband):
+        """Direction selection or H+V ablation with two atan orders.
+
+        hv_post_atan: mean(atan(4 * raw_H), atan(4 * raw_V)).
+        hv_pre_atan:  atan(4 * mean(raw_H, raw_V)).
+        The two modes coincide when use_atan=False.
+        """
+        if self.fdsp_direction in ('hv_post_atan', 'hv_pre_atan'):
+            response_h = self._fdsp_raw(subband, 'horizontal')
+            response_v = self._fdsp_raw(subband, 'vertical')
+
+            if self.fdsp_direction == 'hv_pre_atan':
+                # First fuse H/V raw responses, then apply atan once.
+                response = 0.5 * (response_h + response_v)
+                if self.use_atan:
+                    response = torch.atan(4.0 * response)
+                return response
+
+            # First apply atan to H/V separately, then fuse.
+            if self.use_atan:
+                response_h = torch.atan(4.0 * response_h)
+                response_v = torch.atan(4.0 * response_v)
+            return 0.5 * (response_h + response_v)
+
+        # Preserve single-direction V2 behavior.
+        response = self._fdsp_raw(subband, self.fdsp_direction)
         if self.use_atan:
             response = torch.atan(4.0 * response)
         return response
