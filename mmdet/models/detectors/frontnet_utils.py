@@ -14,6 +14,15 @@ class FDSPNet(nn.Module):
     per-channel scale and bias. ``fdsp_direction`` selects diagonal (the
     original), horizontal, or vertical pixel pairs. Any finite alpha is
     accepted so experiments can also test alpha <= 1.
+
+    V4 adds the one B-DWT-V3 mechanism that does not depend on a wavelet
+    decomposition: an image-conditioned adaptive direction. When
+    ``fdsp_adaptive_direction`` is enabled, diagonal/horizontal/vertical FDSP
+    responses are fused with softmax weights produced from the per-channel
+    mean of the log input. Note that the zero-initialized MLP makes the softmax
+    uniform (1/3 each) at initialization, so the adaptive path is not the
+    diagonal baseline before training. With the flag disabled the forward path
+    is exactly the original Pure-FDSP computation.
     """
 
     def __init__(self,
@@ -21,7 +30,10 @@ class FDSPNet(nn.Module):
                  alpha=1.6,
                  input_mean=(123.675, 116.28, 103.53),
                  input_std=(58.395, 57.12, 57.375),
-                 fdsp_direction='diagonal'):
+                 fdsp_direction='diagonal',
+                 fdsp_adaptive_direction=False,
+                 fdsp_direction_hidden=8,
+                 fdsp_direction_temperature=1.0):
         super().__init__()
         self.use_atan = bool(use_atan)
         self.alpha = float(alpha)
@@ -33,6 +45,11 @@ class FDSPNet(nn.Module):
                 'fdsp_direction must be one of diagonal, horizontal or '
                 f'vertical, got {fdsp_direction!r}')
         self.fdsp_direction = fdsp_direction
+        self.fdsp_adaptive_direction = bool(fdsp_adaptive_direction)
+        self.fdsp_direction_temperature = float(fdsp_direction_temperature)
+        if (not math.isfinite(self.fdsp_direction_temperature)
+                or self.fdsp_direction_temperature <= 0):
+            raise ValueError('fdsp_direction_temperature must be positive')
         self.input_mean = self._validate_rgb_values(input_mean, 'input_mean')
         self.input_std = self._validate_rgb_values(input_std, 'input_std')
         if any(value <= 0 for value in self.input_std):
@@ -45,6 +62,11 @@ class FDSPNet(nn.Module):
         self.bias_by_level = nn.ParameterDict(
             {'ll1': nn.Parameter(torch.zeros(3))})
 
+        self.direction_mlp = None
+        if self.fdsp_adaptive_direction:
+            self.direction_mlp = self._build_zero_output_mlp(
+                3, fdsp_direction_hidden, 3)
+
     @staticmethod
     def _validate_rgb_values(values, name):
         values = tuple(float(value) for value in values)
@@ -52,17 +74,30 @@ class FDSPNet(nn.Module):
             raise ValueError(f'{name} must contain exactly three RGB values')
         return values
 
-    def _fdsp(self, subband):
+    @staticmethod
+    def _build_zero_output_mlp(in_features, hidden_features, out_features):
+        hidden_features = int(hidden_features)
+        if hidden_features <= 0:
+            raise ValueError('adaptive MLP hidden size must be positive')
+        mlp = nn.Sequential(
+            nn.Linear(in_features, hidden_features),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_features, out_features))
+        nn.init.zeros_(mlp[-1].weight)
+        nn.init.zeros_(mlp[-1].bias)
+        return mlp
+
+    def _fdsp_with_direction(self, subband, direction):
         # Replicate-pad right and bottom so all four shifted views retain H x W.
         padded = F.pad(subband, (0, 1, 0, 1), mode='replicate')
         i1 = padded[:, :, :-1, :-1]
         i2 = padded[:, :, :-1, 1:]
         i3 = padded[:, :, 1:, :-1]
         i4 = padded[:, :, 1:, 1:]
-        if self.fdsp_direction == 'diagonal':
+        if direction == 'diagonal':
             d1 = i1 - i4
             d2 = i2 - i3
-        elif self.fdsp_direction == 'horizontal':
+        elif direction == 'horizontal':
             d1 = i1 - i2
             d2 = i3 - i4
         else:  # vertical
@@ -73,6 +108,21 @@ class FDSPNet(nn.Module):
             response = torch.atan(4.0 * response)
         return response
 
+    def _fdsp(self, subband):
+        return self._fdsp_with_direction(subband, self.fdsp_direction)
+
+    def _adaptive_fdsp(self, log_subband):
+        context = log_subband.mean(dim=(2, 3))
+        logits = self.direction_mlp(context)
+        weights = F.softmax(
+            logits / self.fdsp_direction_temperature, dim=1)
+        responses = torch.stack([
+            self._fdsp_with_direction(log_subband, 'diagonal'),
+            self._fdsp_with_direction(log_subband, 'horizontal'),
+            self._fdsp_with_direction(log_subband, 'vertical')
+        ], dim=1)
+        return (responses * weights[:, :, None, None, None]).sum(dim=1)
+
     def forward(self, img):
         if img.ndim != 4 or img.shape[1] != 3:
             raise ValueError(
@@ -81,9 +131,16 @@ class FDSPNet(nn.Module):
         mean = img.new_tensor(self.input_mean).view(1, 3, 1, 1)
         std = img.new_tensor(self.input_std).view(1, 3, 1, 1)
         x = ((img * std + mean).clamp(min=0.0, max=255.0) / 255.0)
-        x = torch.log(x.clamp(min=1e-6))
-        per_channel = [self._fdsp(channel) for channel in x.split(1, dim=1)]
-        response = torch.cat(per_channel, dim=1)
+        log_x = torch.log(x.clamp(min=1e-6))
+
+        if self.fdsp_adaptive_direction:
+            response = self._adaptive_fdsp(log_x)
+        else:
+            per_channel = [
+                self._fdsp(channel) for channel in log_x.split(1, dim=1)
+            ]
+            response = torch.cat(per_channel, dim=1)
+
         scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
         bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
         return response * scale + bias
@@ -98,7 +155,10 @@ class FrontNet(nn.Module):
                  fdsp_alpha=1.6,
                  fdsp_input_mean=(123.675, 116.28, 103.53),
                  fdsp_input_std=(58.395, 57.12, 57.375),
-                 fdsp_direction='diagonal'):
+                 fdsp_direction='diagonal',
+                 fdsp_adaptive_direction=False,
+                 fdsp_direction_hidden=8,
+                 fdsp_direction_temperature=1.0):
         super(FrontNet, self).__init__()
         self.fdsp_use_residual = bool(fdsp_use_residual)
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
@@ -116,7 +176,10 @@ class FrontNet(nn.Module):
             alpha=fdsp_alpha,
             input_mean=fdsp_input_mean,
             input_std=fdsp_input_std,
-            fdsp_direction=fdsp_direction)
+            fdsp_direction=fdsp_direction,
+            fdsp_adaptive_direction=fdsp_adaptive_direction,
+            fdsp_direction_hidden=fdsp_direction_hidden,
+            fdsp_direction_temperature=fdsp_direction_temperature)
 
     def forward(self, x):
         feat_f = self.fdspnet(x)
