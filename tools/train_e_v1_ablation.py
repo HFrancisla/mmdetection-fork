@@ -7,7 +7,7 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--stage', choices=('a', 'b', 'c', 'f', 'i', 'l', 'g', 'all'), default='a')
+    parser.add_argument('--stage', choices=('a', 'b', 'c', 'f', 'i', 'g', 'all'), default='a')
     parser.add_argument('--case', help='e.g. b3_illum_gate')
     parser.add_argument('--seeds', default='1,42,2026')
     parser.add_argument('--python', default=sys.executable, help='Python from MMDetection environment')

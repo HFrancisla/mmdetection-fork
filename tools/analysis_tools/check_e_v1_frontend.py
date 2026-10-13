@@ -110,6 +110,26 @@ def main():
         _, aux = m(x, return_aux=True)
     check('consistency absent at test time', 'loss_consistency' not in aux)
 
+    # B2 spatial_gate and former L0 no-illum-prior are the same function:
+    # spatial_gate zeros the prior internally, whereas illumination=none
+    # supplies exactly that zero prior to illum_gate. Verify equality beyond
+    # the zero-initialized RGB output layer by checking gate weights too.
+    b2 = new(illumination=dict(type='analytic'),
+             fusion=dict(type='spatial_gate'))
+    old_l0 = new(illumination=dict(type='none'),
+                 fusion=dict(type='illum_gate'))
+    old_l0.load_state_dict(b2.state_dict())
+    b2.eval()
+    old_l0.eval()
+    with torch.no_grad():
+        b2_output, b2_aux = b2(x, return_aux=True)
+        l0_output, l0_aux = old_l0(x, return_aux=True)
+    check('B2 and former L0 identical gate weights',
+          torch.allclose(b2_aux['gate_weights'],
+                         l0_aux['gate_weights'], atol=1e-7))
+    check('B2 and former L0 identical frontend output',
+          torch.allclose(b2_output, l0_output, atol=1e-7))
+
     # Zero-DC IIM kernels cancel constant log-chromaticity in the interior.
     extractor = frontend.ZeroMeanChromaticConv(num_filters=3, kernel_size=3)
     constant = torch.tensor([0.2, 0.3, 0.4]).view(1, 3, 1, 1).expand(1, 3, 15, 15)

@@ -44,9 +44,8 @@ All configs live in configs/frontnet/e_v1. Common model and ExDark x TOOD traini
 | A | a4_spatial_fdsp_iim | S + F + I, concat |
 | A | a5_cnn_control | ordinary CNN in place of FDSP |
 | A | a6_fdsp_log_control | log RGB + same FDSP affine/residual and CNN without actual FDSP |
-| B | b0_concat | vanilla concat fusion |
 | B | b1_global_gate | global softmax gating |
-| B | b2_spatial_gate | spatial softmax gating without illumination prior |
+| B | b2_spatial_gate | spatial softmax gate with zero illumination input (also covers former L0) |
 | B | b3_illum_gate | spatial softmax gating with illumination prior |
 | B | b4_illum_gate_consistency | B3 + Gamma consistency |
 | C | c1_reflectance_fdsp | log RGB - log blurred luminance before FDSP |
@@ -60,10 +59,14 @@ All configs live in configs/frontnet/e_v1. Common model and ExDark x TOOD traini
 | I | i1_color_ratio | log color ratios without learned IIM kernels |
 | I | i2_unconstrained | IIM convolution without zero-DC constraint |
 | I | i3_logrgb_filter | same filter shape on log RGB instead of log ratios |
-| L | l0_without_prior | no illumination guidance |
 | G | g1_mean | uniform branch mean |
 
-A4 and B0, and the default base and B3, intentionally define equivalent configurations. They should not be counted as distinct methods.
+**Deduplicated design: 23 executable experiment configurations = 69 training runs with seeds 1,42,2026.**
+
+- The former `b0_concat` was exactly the same inherited model configuration as `a4_spatial_fdsp_iim`; keep **A4** as the concat control.
+- The former `l0_without_prior` sent zero illumination priors to the same spatial-gating network as `b2_spatial_gate`; keep **B2** as the no-illumination control.
+- The shared `tood_hybrid_exdark_base.py` has the same defaults as **B3**, but is the common inheritance file, **not a separately scheduled run**.
+- The key illumination-ablation pair is now **B2 vs B3**, without redundant L0 training.
 
 The F/I and fusion switches are independent but do not all have matching trainable-parameter counts. The log_control, iim_unconstrained and iim_rgb controls isolate mathematical components better than ordinary CNN controls. For publication, report Params/FLOPs, training variance and any remaining capacity differences.
 
