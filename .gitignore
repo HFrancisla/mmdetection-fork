@@ -122,3 +122,5 @@ work_dirs/
 *.py~
 *.sh~
 .agents/
+tmp/
+tmp/
