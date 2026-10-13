@@ -12,8 +12,9 @@ class FDSPNet(nn.Module):
     then compute FDSP for R, G, and B independently. The three responses are
     concatenated in RGB order and passed through the original learned
     per-channel scale and bias. ``fdsp_direction`` selects diagonal (the
-    original), horizontal, or vertical pixel pairs. Any finite alpha is
-    accepted so experiments can also test alpha <= 1.
+    original), horizontal, vertical, or a fused horizontal+vertical response.
+    The H+V mode supports fusing before or after the optional atan transform.
+    Any finite alpha is accepted so experiments can also test alpha <= 1.
     """
 
     def __init__(self,
@@ -27,11 +28,13 @@ class FDSPNet(nn.Module):
         self.alpha = float(alpha)
         if not math.isfinite(self.alpha):
             raise ValueError(f'FDSP alpha must be finite, got {alpha!r}')
-        valid_directions = ('diagonal', 'horizontal', 'vertical')
+        valid_directions = (
+            'diagonal', 'horizontal', 'vertical',
+            'hv_post_atan', 'hv_pre_atan')
         if fdsp_direction not in valid_directions:
             raise ValueError(
-                'fdsp_direction must be one of diagonal, horizontal or '
-                f'vertical, got {fdsp_direction!r}')
+                f'fdsp_direction must be one of {valid_directions}, '
+                f'got {fdsp_direction!r}')
         self.fdsp_direction = fdsp_direction
         self.input_mean = self._validate_rgb_values(input_mean, 'input_mean')
         self.input_std = self._validate_rgb_values(input_std, 'input_std')
@@ -52,23 +55,50 @@ class FDSPNet(nn.Module):
             raise ValueError(f'{name} must contain exactly three RGB values')
         return values
 
-    def _fdsp(self, subband):
+    def _fdsp_raw(self, subband, direction):
+        """Compute one FDSP direction without the optional atan transform."""
         # Replicate-pad right and bottom so all four shifted views retain H x W.
         padded = F.pad(subband, (0, 1, 0, 1), mode='replicate')
         i1 = padded[:, :, :-1, :-1]
         i2 = padded[:, :, :-1, 1:]
         i3 = padded[:, :, 1:, :-1]
         i4 = padded[:, :, 1:, 1:]
-        if self.fdsp_direction == 'diagonal':
+        if direction == 'diagonal':
             d1 = i1 - i4
             d2 = i2 - i3
-        elif self.fdsp_direction == 'horizontal':
+        elif direction == 'horizontal':
             d1 = i1 - i2
             d2 = i3 - i4
-        else:  # vertical
+        elif direction == 'vertical':
             d1 = i1 - i3
             d2 = i2 - i4
-        response = (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
+        else:
+            raise ValueError(f'unsupported FDSP direction: {direction!r}')
+        return (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
+
+    def _fdsp(self, subband):
+        """Compute one direction or fuse horizontal and vertical responses.
+
+        ``hv_post_atan`` averages atan-transformed H and V responses;
+        ``hv_pre_atan`` averages raw H and V responses before applying atan.
+        With ``use_atan=False``, both modes reduce to the same raw H+V mean.
+        """
+        if self.fdsp_direction in ('hv_post_atan', 'hv_pre_atan'):
+            response_h = self._fdsp_raw(subband, 'horizontal')
+            response_v = self._fdsp_raw(subband, 'vertical')
+
+            if self.fdsp_direction == 'hv_pre_atan':
+                response = 0.5 * (response_h + response_v)
+                if self.use_atan:
+                    response = torch.atan(4.0 * response)
+                return response
+
+            if self.use_atan:
+                response_h = torch.atan(4.0 * response_h)
+                response_v = torch.atan(4.0 * response_v)
+            return 0.5 * (response_h + response_v)
+
+        response = self._fdsp_raw(subband, self.fdsp_direction)
         if self.use_atan:
             response = torch.atan(4.0 * response)
         return response
