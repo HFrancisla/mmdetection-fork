@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .base_video_metric import BaseVideoMetric
+from .classwise_recall_metric import ClasswiseRecallMetric
 from .cityscapes_metric import CityScapesMetric
 from .coco_caption_metric import COCOCaptionMetric
 from .coco_metric import CocoMetric
@@ -26,7 +27,7 @@ from .youtube_vis_metric import YouTubeVISMetric
 
 __all__ = [
     'CityScapesMetric', 'CocoMetric', 'CocoPanopticMetric', 'OpenImagesMetric',
-    'VOCMetric', 'LVISMetric', 'CrowdHumanMetric', 'DumpProposals',
+    'VOCMetric', 'ClasswiseRecallMetric', 'LVISMetric', 'CrowdHumanMetric', 'DumpProposals',
     'CocoOccludedSeparatedMetric', 'DumpDetResults', 'BaseVideoMetric',
     'MOTChallengeMetric', 'CocoVideoMetric', 'ReIDMetrics', 'YouTubeVISMetric',
     'COCOCaptionMetric', 'SemSegMetric', 'RefSegMetric', 'RefExpMetric',
