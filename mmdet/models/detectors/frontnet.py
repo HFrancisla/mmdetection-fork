@@ -24,7 +24,9 @@ class FrontNetBaseDetector(BaseDetector):
                 fdsp_direction = 'diagonal',
                 fdsp_adaptive_direction = False,
                 fdsp_direction_hidden = 8,
-                fdsp_direction_temperature = 1.0
+                fdsp_direction_temperature = 1.0,
+                fdsp_refine_mode = 'none',
+                fdsp_refine_use_shortcut = True
                 )-> None:
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
@@ -47,7 +49,9 @@ class FrontNetBaseDetector(BaseDetector):
             fdsp_direction=fdsp_direction,
             fdsp_adaptive_direction=fdsp_adaptive_direction,
             fdsp_direction_hidden=fdsp_direction_hidden,
-            fdsp_direction_temperature=fdsp_direction_temperature)
+            fdsp_direction_temperature=fdsp_direction_temperature,
+            fdsp_refine_mode=fdsp_refine_mode,
+            fdsp_refine_use_shortcut=fdsp_refine_use_shortcut)
 
     def _load_from_state_dict(self, state_dict: dict, prefix: str, local_metadata: dict, strict: bool, missing_keys: Union[List[str], str], 
                               unexpected_keys: Union[List[str], str], error_msgs: Union[List[str], str]) -> None:
@@ -112,7 +116,9 @@ class FrontNet(FrontNetBaseDetector):
                 fdsp_direction = 'diagonal',
                 fdsp_adaptive_direction = False,
                 fdsp_direction_hidden = 8,
-                fdsp_direction_temperature = 1.0) -> None:
+                fdsp_direction_temperature = 1.0,
+                fdsp_refine_mode = 'none',
+                fdsp_refine_use_shortcut = True) -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -130,5 +136,7 @@ class FrontNet(FrontNetBaseDetector):
             fdsp_direction=fdsp_direction,
             fdsp_adaptive_direction=fdsp_adaptive_direction,
             fdsp_direction_hidden=fdsp_direction_hidden,
-            fdsp_direction_temperature=fdsp_direction_temperature
+            fdsp_direction_temperature=fdsp_direction_temperature,
+            fdsp_refine_mode=fdsp_refine_mode,
+            fdsp_refine_use_shortcut=fdsp_refine_use_shortcut
             )

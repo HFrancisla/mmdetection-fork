@@ -4,6 +4,57 @@ import torch.nn as nn
 import torch
 
 
+class FDSPGatedResidualRefinement(nn.Module):
+    """Refine the three-channel FDSP response with a gated two-scale block.
+
+    Both modes apply the diagram's 3x3 detail and 9x9 smooth convolutions,
+    followed by ``smooth + sigmoid(relu(1x1([detail, smooth]))) * detail``.
+    ``use_shortcut`` controls whether the input is added to that result.
+    ``channelwise`` keeps every operation independent for each RGB channel;
+    ``rgb`` applies regular multi-channel convolutions, so the detail, smooth,
+    and gate branches can mix color information.
+    """
+
+    MODES = ('channelwise', 'rgb')
+
+    def __init__(self, mode='channelwise', use_shortcut=True):
+        super().__init__()
+        if mode not in self.MODES:
+            raise ValueError(
+                f'fdsp_refine_mode must be one of {self.MODES}, got {mode!r}')
+        self.mode = mode
+        self.use_shortcut = bool(use_shortcut)
+        groups = 3 if mode == 'channelwise' else 1
+        self.detail_conv = nn.Conv2d(
+            3, 3, kernel_size=3, padding=1, groups=groups)
+        self.smooth_conv = nn.Conv2d(
+            3, 3, kernel_size=9, padding=4, groups=groups)
+        if mode == 'channelwise':
+            # Interleave [detail_c, smooth_c] so each group processes one RGB
+            # channel independently and produces its own scalar gate map.
+            self.gate_conv = nn.Conv2d(6, 3, kernel_size=1, groups=3)
+        else:
+            # The RGB variant uses the 1x1 convolution to mix all RGB/scale
+            # responses into three channel-specific gates.
+            self.gate_conv = nn.Conv2d(6, 3, kernel_size=1)
+        self.relu = nn.ReLU(inplace=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        detail = self.relu(self.detail_conv(x))
+        smooth = self.relu(self.smooth_conv(x))
+        if self.mode == 'channelwise':
+            n, _, h, w = detail.shape
+            paired = torch.stack((detail, smooth), dim=2).reshape(n, 6, h, w)
+        else:
+            paired = torch.cat((detail, smooth), dim=1)
+        gate = self.sigmoid(self.relu(self.gate_conv(paired)))
+        output = smooth + gate * detail
+        if self.use_shortcut:
+            output = output + x
+        return output
+
+
 class FDSPNet(nn.Module):
     """Log-normalize RGB input and apply FDSP independently per channel.
 
@@ -21,8 +72,9 @@ class FDSPNet(nn.Module):
     responses are fused with softmax weights produced from the per-channel
     mean of the log input. Note that the zero-initialized MLP makes the softmax
     uniform (1/3 each) at initialization, so the adaptive path is not the
-    diagonal baseline before training. With the flag disabled the forward path
-    is exactly the original Pure-FDSP computation.
+    diagonal baseline before training. With adaptive direction and post-FDSP
+    refinement disabled, the forward path follows the original Pure-FDSP
+    computation.
     """
 
     def __init__(self,
@@ -33,7 +85,9 @@ class FDSPNet(nn.Module):
                  fdsp_direction='diagonal',
                  fdsp_adaptive_direction=False,
                  fdsp_direction_hidden=8,
-                 fdsp_direction_temperature=1.0):
+                 fdsp_direction_temperature=1.0,
+                 fdsp_refine_mode='none',
+                 fdsp_refine_use_shortcut=True):
         super().__init__()
         self.use_atan = bool(use_atan)
         self.alpha = float(alpha)
@@ -66,6 +120,12 @@ class FDSPNet(nn.Module):
         if self.fdsp_adaptive_direction:
             self.direction_mlp = self._build_zero_output_mlp(
                 3, fdsp_direction_hidden, 3)
+
+        self.fdsp_refinement = (
+            None if fdsp_refine_mode == 'none' else
+            FDSPGatedResidualRefinement(
+                mode=fdsp_refine_mode,
+                use_shortcut=fdsp_refine_use_shortcut))
 
     @staticmethod
     def _validate_rgb_values(values, name):
@@ -143,7 +203,10 @@ class FDSPNet(nn.Module):
 
         scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
         bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
-        return response * scale + bias
+        response = response * scale + bias
+        if self.fdsp_refinement is not None:
+            response = self.fdsp_refinement(response)
+        return response
 
 
 class FrontNet(nn.Module):
@@ -158,7 +221,9 @@ class FrontNet(nn.Module):
                  fdsp_direction='diagonal',
                  fdsp_adaptive_direction=False,
                  fdsp_direction_hidden=8,
-                 fdsp_direction_temperature=1.0):
+                 fdsp_direction_temperature=1.0,
+                 fdsp_refine_mode='none',
+                 fdsp_refine_use_shortcut=True):
         super(FrontNet, self).__init__()
         self.fdsp_use_residual = bool(fdsp_use_residual)
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
@@ -179,7 +244,9 @@ class FrontNet(nn.Module):
             fdsp_direction=fdsp_direction,
             fdsp_adaptive_direction=fdsp_adaptive_direction,
             fdsp_direction_hidden=fdsp_direction_hidden,
-            fdsp_direction_temperature=fdsp_direction_temperature)
+            fdsp_direction_temperature=fdsp_direction_temperature,
+            fdsp_refine_mode=fdsp_refine_mode,
+            fdsp_refine_use_shortcut=fdsp_refine_use_shortcut)
 
     def forward(self, x):
         feat_f = self.fdspnet(x)
