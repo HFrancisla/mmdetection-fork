@@ -102,6 +102,15 @@ Start actual training (only in a configured MMDetection training environment):
 
 Use --python PATH to select the Python executable used by tools/train.py. All workdirs are unique under work_dirs/e_v1. The training launcher stops on first failure.
 
+For the A+B seed sweep, use `tools/train_e_v1_ab_groups.sh`. It runs the 7 A
+configs followed by the 4 B configs, each with seeds 1, 42, and 2026, serially
+in a detached tmux session by default. Logs and result workdirs are isolated
+under `tmp/logs/e_v1_ab/` and `tmp/results/e_v1_ab/`. The first run (A0, seed 1)
+is checked for both epoch-6 mAP and macro recall; after reviewing that eval,
+create the printed `CONTINUE_AFTER_FIRST_EVAL` file in the run directory to
+release the remaining queue. Use `--foreground` to run the same queue in the
+current terminal.
+
 ## Research boundaries
 
 - The IIM module uses YOLA-inspired log chromaticity and zero-mean spatial filtering; it does not reproduce original YOLA results.

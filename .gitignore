@@ -126,3 +126,4 @@ work_dirs/
 # Experiment artifacts
 /tmp/logs/
 /tmp/results/
+/tmp/test_results/
