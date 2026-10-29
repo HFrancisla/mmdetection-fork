@@ -5,6 +5,7 @@ _base_ = ['./tood_frontnet_exdark_d_pure_fdsp_a0_r1_gsc1_seed42.py']
 # Same adaptive-direction switches as d_v4_base, only the surrounding flags
 # change so ad1 can also be tested against the strongest Pure-FDSP setting.
 model = dict(
+    fdsp_use_affine=False,
     fdsp_direction='diagonal',
     fdsp_adaptive_direction=False,
     fdsp_direction_hidden=8,

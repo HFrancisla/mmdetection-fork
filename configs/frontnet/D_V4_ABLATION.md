@@ -36,14 +36,16 @@ out           = response * scale + bias
 ```
 
 The MLP is `Linear(3, hidden) -> ReLU -> Linear(hidden, 3)`, with the last
-layer zero-initialized (59 extra trainable parameters at hidden=8). The original
-Pure-FDSP per-RGB affine (6 parameters) is unchanged and still applied after
-the fusion.
+layer zero-initialized (59 extra trainable parameters at hidden=8). The legacy
+Pure-FDSP per-RGB affine (6 parameters) is controlled by `fdsp_use_affine` and
+disabled in the active V4 configs. When disabled, its parameters remain frozen
+for checkpoint-key compatibility and the forward path skips the transform.
 
 ## Configurable model arguments
 
 | Key | Meaning |
 | --- | --- |
+| `fdsp_use_affine` | Legacy per-RGB affine transform, disabled by default |
 | `fdsp_adaptive_direction` | Enable image-conditioned D/H/V softmax fusion, default `False` |
 | `fdsp_direction_hidden` | Hidden width of the direction MLP, default `8` |
 | `fdsp_direction_temperature` | Softmax temperature, must be positive, default `1.0` |

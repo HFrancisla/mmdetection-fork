@@ -33,9 +33,11 @@ class FDSPNet(nn.Module):
                  fdsp_direction='diagonal',
                  fdsp_adaptive_direction=False,
                  fdsp_direction_hidden=8,
-                 fdsp_direction_temperature=1.0):
+                 fdsp_direction_temperature=1.0,
+                 use_affine=False):
         super().__init__()
         self.use_atan = bool(use_atan)
+        self.use_affine = bool(use_affine)
         self.alpha = float(alpha)
         if not math.isfinite(self.alpha):
             raise ValueError(f'FDSP alpha must be finite, got {alpha!r}')
@@ -55,12 +57,14 @@ class FDSPNet(nn.Module):
         if any(value <= 0 for value in self.input_std):
             raise ValueError('FDSP input_std values must all be positive')
 
-        # Preserve DWTNet's learnable per-channel affine transform and its
-        # initialization; only the wavelet decomposition/reconstruction is removed.
+        # Preserve legacy state-dict keys. When affine is disabled, keep the
+        # parameters frozen but bypass the transform in forward.
         self.scale_by_level = nn.ParameterDict(
-            {'ll1': nn.Parameter(torch.full((3,), 0.3))})
+            {'ll1': nn.Parameter(
+                torch.full((3,), 0.3), requires_grad=self.use_affine)})
         self.bias_by_level = nn.ParameterDict(
-            {'ll1': nn.Parameter(torch.zeros(3))})
+            {'ll1': nn.Parameter(
+                torch.zeros(3), requires_grad=self.use_affine)})
 
         self.direction_mlp = None
         if self.fdsp_adaptive_direction:
@@ -141,9 +145,11 @@ class FDSPNet(nn.Module):
             ]
             response = torch.cat(per_channel, dim=1)
 
-        scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
-        bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
-        return response * scale + bias
+        if self.use_affine:
+            scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
+            bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
+            response = response * scale + bias
+        return response
 
 
 class FrontNet(nn.Module):
@@ -158,7 +164,8 @@ class FrontNet(nn.Module):
                  fdsp_direction='diagonal',
                  fdsp_adaptive_direction=False,
                  fdsp_direction_hidden=8,
-                 fdsp_direction_temperature=1.0):
+                 fdsp_direction_temperature=1.0,
+                 fdsp_use_affine=False):
         super(FrontNet, self).__init__()
         self.fdsp_use_residual = bool(fdsp_use_residual)
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
@@ -179,7 +186,8 @@ class FrontNet(nn.Module):
             fdsp_direction=fdsp_direction,
             fdsp_adaptive_direction=fdsp_adaptive_direction,
             fdsp_direction_hidden=fdsp_direction_hidden,
-            fdsp_direction_temperature=fdsp_direction_temperature)
+            fdsp_direction_temperature=fdsp_direction_temperature,
+            use_affine=fdsp_use_affine)
 
     def forward(self, x):
         feat_f = self.fdspnet(x)

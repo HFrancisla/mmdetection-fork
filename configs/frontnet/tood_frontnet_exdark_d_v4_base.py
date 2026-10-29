@@ -8,6 +8,7 @@ _base_ = ['./tood_frontnet_exdark_d_pure_fdsp_a1_r1_gsc0_seed42.py']
 # with True it fuses diagonal/horizontal/vertical FDSP with softmax weights
 # predicted from the per-channel mean of the log input.
 model = dict(
+    fdsp_use_affine=False,
     fdsp_direction='diagonal',
     fdsp_adaptive_direction=False,
     fdsp_direction_hidden=8,
