@@ -61,10 +61,13 @@ class FDSPNet(nn.Module):
     Detector inputs are normalized RGB tensors. Restore pixel values using
     the data-preprocessor statistics, map them to [0, 1], take the logarithm,
     then compute FDSP for R, G, and B independently. The three responses are
-    concatenated in RGB order and passed through the original learned
-    per-channel scale and bias. ``fdsp_direction`` selects diagonal (the
-    original), horizontal, or vertical pixel pairs. Any finite alpha is
-    accepted so experiments can also test alpha <= 1.
+    concatenated in RGB order. An optional learned per-channel affine
+    transform can adjust the response before refinement. ``fdsp_direction``
+    selects a single direction,
+    an H+V mean, or an H+V+diagonal mean. The ``*_pre_atan`` modes apply atan
+    after the directional mean; ``*_post_atan`` modes apply it to each
+    direction before averaging. Any finite alpha is accepted so experiments
+    can also test alpha <= 1.
 
     V4 adds the one B-DWT-V3 mechanism that does not depend on a wavelet
     decomposition: an image-conditioned adaptive direction. When
@@ -87,17 +90,22 @@ class FDSPNet(nn.Module):
                  fdsp_direction_hidden=8,
                  fdsp_direction_temperature=1.0,
                  fdsp_refine_mode='none',
-                 fdsp_refine_use_shortcut=True):
+                 fdsp_refine_use_shortcut=True,
+                 use_affine=False):
         super().__init__()
         self.use_atan = bool(use_atan)
+        self.use_affine = bool(use_affine)
         self.alpha = float(alpha)
         if not math.isfinite(self.alpha):
             raise ValueError(f'FDSP alpha must be finite, got {alpha!r}')
-        valid_directions = ('diagonal', 'horizontal', 'vertical')
+        valid_directions = (
+            'diagonal', 'horizontal', 'vertical',
+            'hv_pre_atan', 'hv_post_atan',
+            'hvd_pre_atan', 'hvd_post_atan')
         if fdsp_direction not in valid_directions:
             raise ValueError(
-                'fdsp_direction must be one of diagonal, horizontal or '
-                f'vertical, got {fdsp_direction!r}')
+                f'fdsp_direction must be one of {valid_directions}, '
+                f'got {fdsp_direction!r}')
         self.fdsp_direction = fdsp_direction
         self.fdsp_adaptive_direction = bool(fdsp_adaptive_direction)
         self.fdsp_direction_temperature = float(fdsp_direction_temperature)
@@ -109,12 +117,15 @@ class FDSPNet(nn.Module):
         if any(value <= 0 for value in self.input_std):
             raise ValueError('FDSP input_std values must all be positive')
 
-        # Preserve DWTNet's learnable per-channel affine transform and its
-        # initialization; only the wavelet decomposition/reconstruction is removed.
+        # Keep the legacy state-dict keys. When disabled, these frozen values
+        # are skipped in forward; enabling affine restores the trainable
+        # transform.
         self.scale_by_level = nn.ParameterDict(
-            {'ll1': nn.Parameter(torch.full((3,), 0.3))})
+            {'ll1': nn.Parameter(
+                torch.full((3,), 0.3), requires_grad=self.use_affine)})
         self.bias_by_level = nn.ParameterDict(
-            {'ll1': nn.Parameter(torch.zeros(3))})
+            {'ll1': nn.Parameter(
+                torch.zeros(3), requires_grad=self.use_affine)})
 
         self.direction_mlp = None
         if self.fdsp_adaptive_direction:
@@ -147,7 +158,8 @@ class FDSPNet(nn.Module):
         nn.init.zeros_(mlp[-1].bias)
         return mlp
 
-    def _fdsp_with_direction(self, subband, direction):
+    def _fdsp_raw(self, subband, direction):
+        """Compute one FDSP direction before the optional atan transform."""
         # Replicate-pad right and bottom so all four shifted views retain H x W.
         padded = F.pad(subband, (0, 1, 0, 1), mode='replicate')
         i1 = padded[:, :, :-1, :-1]
@@ -163,12 +175,39 @@ class FDSPNet(nn.Module):
         else:  # vertical
             d1 = i1 - i3
             d2 = i2 - i4
-        response = (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
+        return (self.alpha - 1.0) * (d1.abs() + d2.abs()) + d1 + d2
+
+    def _fdsp_with_direction(self, subband, direction):
+        response = self._fdsp_raw(subband, direction)
         if self.use_atan:
             response = torch.atan(4.0 * response)
         return response
 
     def _fdsp(self, subband):
+        """Compute a direction or average H/V[/D] before or after atan.
+
+        The ``*_pre_atan`` modes average the raw responses, then apply atan.
+        The ``*_post_atan`` modes apply atan independently to each raw response
+        before averaging. With atan disabled, each pair produces the same raw
+        mean, which preserves the historical D-V2 behavior.
+        """
+        if self.fdsp_direction in (
+                'hv_pre_atan', 'hv_post_atan',
+                'hvd_pre_atan', 'hvd_post_atan'):
+            directions = ('horizontal', 'vertical')
+            if self.fdsp_direction.startswith('hvd_'):
+                directions += ('diagonal',)
+            responses = [
+                self._fdsp_raw(subband, direction)
+                for direction in directions
+            ]
+            if self.use_atan and self.fdsp_direction.endswith('_pre_atan'):
+                response = torch.stack(responses, dim=0).mean(dim=0)
+                return torch.atan(4.0 * response)
+            if self.use_atan:
+                responses = [torch.atan(4.0 * response)
+                             for response in responses]
+            return torch.stack(responses, dim=0).mean(dim=0)
         return self._fdsp_with_direction(subband, self.fdsp_direction)
 
     def _adaptive_fdsp(self, log_subband):
@@ -201,9 +240,10 @@ class FDSPNet(nn.Module):
             ]
             response = torch.cat(per_channel, dim=1)
 
-        scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
-        bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
-        response = response * scale + bias
+        if self.use_affine:
+            scale = self.scale_by_level['ll1'].view(1, 3, 1, 1)
+            bias = self.bias_by_level['ll1'].view(1, 3, 1, 1)
+            response = response * scale + bias
         if self.fdsp_refinement is not None:
             response = self.fdsp_refinement(response)
         return response
@@ -223,7 +263,8 @@ class FrontNet(nn.Module):
                  fdsp_direction_hidden=8,
                  fdsp_direction_temperature=1.0,
                  fdsp_refine_mode='none',
-                 fdsp_refine_use_shortcut=True):
+                 fdsp_refine_use_shortcut=True,
+                 fdsp_use_affine=False):
         super(FrontNet, self).__init__()
         self.fdsp_use_residual = bool(fdsp_use_residual)
         self.spatial_net = nn.Sequential(*[nn.Conv2d(3, 24, 3, 1, 1, groups=1),
@@ -238,6 +279,7 @@ class FrontNet(nn.Module):
                                         nn.Conv2d(32, 3, 3, 1, 1, groups=1)])
         self.fdspnet = FDSPNet(
             use_atan=fdsp_use_atan,
+            use_affine=fdsp_use_affine,
             alpha=fdsp_alpha,
             input_mean=fdsp_input_mean,
             input_std=fdsp_input_std,
