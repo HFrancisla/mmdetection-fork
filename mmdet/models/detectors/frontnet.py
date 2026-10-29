@@ -26,7 +26,8 @@ class FrontNetBaseDetector(BaseDetector):
                 fdsp_direction_hidden = 8,
                 fdsp_direction_temperature = 1.0,
                 fdsp_refine_mode = 'none',
-                fdsp_refine_use_shortcut = True
+                fdsp_refine_use_shortcut = True,
+                fdsp_use_affine = False
                 )-> None:
         super().__init__(data_preprocessor=data_preprocessor, init_cfg=init_cfg)
 
@@ -42,6 +43,7 @@ class FrontNetBaseDetector(BaseDetector):
         self.frontnet_use_shortcut = bool(frontnet_use_shortcut)
         self.front_net = FrontNetFrontend(
             fdsp_use_atan=fdsp_use_atan,
+            fdsp_use_affine=fdsp_use_affine,
             fdsp_use_residual=fdsp_use_residual,
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
@@ -118,7 +120,8 @@ class FrontNet(FrontNetBaseDetector):
                 fdsp_direction_hidden = 8,
                 fdsp_direction_temperature = 1.0,
                 fdsp_refine_mode = 'none',
-                fdsp_refine_use_shortcut = True) -> None:
+                fdsp_refine_use_shortcut = True,
+                fdsp_use_affine = False) -> None:
         super().__init__(
             backbone=backbone,
             neck=neck,
@@ -129,6 +132,7 @@ class FrontNet(FrontNetBaseDetector):
             init_cfg=init_cfg,
             frontnet_use_shortcut=frontnet_use_shortcut,
             fdsp_use_atan=fdsp_use_atan,
+            fdsp_use_affine=fdsp_use_affine,
             fdsp_use_residual=fdsp_use_residual,
             fdsp_alpha=fdsp_alpha,
             fdsp_input_mean=fdsp_input_mean,
